@@ -46,6 +46,7 @@ cvar_t	*cl_timeout;
 cvar_t	*cl_predict;
 //cvar_t	*cl_minfps;
 cvar_t	*cl_maxfps;
+cvar_t	*cl_drawfps;
 cvar_t	*cl_gun;
 
 cvar_t	*cl_add_particles;
@@ -160,7 +161,7 @@ Begins recording a demo from the current position
 void CL_Record_f (void)
 {
 	char	name[MAX_OSPATH];
-	char	buf_data[MAX_MSGLEN];
+	byte	buf_data[MAX_MSGLEN];
 	sizebuf_t	buf;
 	int		i;
 	int		len;
@@ -422,6 +423,8 @@ void CL_SendConnectPacket (void)
 	netadr_t	adr;
 	int		port;
 
+        memset(&adr, 0, sizeof(adr));
+        
 	if (!NET_StringToAdr (cls.servername, &adr))
 	{
 		Com_Printf ("Bad server address\n");
@@ -543,6 +546,7 @@ void CL_Rcon_f (void)
 		return;
 	}
 
+	memset(&to, 0, sizeof(to));
 	message[0] = (char)255;
 	message[1] = (char)255;
 	message[2] = (char)255;
@@ -644,9 +648,9 @@ void CL_Disconnect (void)
 	// send a disconnect message to the server
 	final[0] = clc_stringcmd;
 	strcpy ((char *)final+1, "disconnect");
-	Netchan_Transmit (&cls.netchan, strlen(final), final);
-	Netchan_Transmit (&cls.netchan, strlen(final), final);
-	Netchan_Transmit (&cls.netchan, strlen(final), final);
+	Netchan_Transmit (&cls.netchan, strlen((char *)final), final);
+	Netchan_Transmit (&cls.netchan, strlen((char *)final), final);
+	Netchan_Transmit (&cls.netchan, strlen((char *)final), final);
 
 	CL_ClearState ();
 
@@ -816,6 +820,12 @@ void CL_PingServers_f (void)
 		adr.type = NA_BROADCAST;
 		adr.port = BigShort(PORT_SERVER);
 		Netchan_OutOfBandPrint (NS_CLIENT, adr, va("info %i", PROTOCOL_VERSION));
+#ifdef HAVE_IPV6
+                Com_Printf ("pinging multicast...\n");
+		adr.type = NA_MULTICAST6;
+		adr.port = BigShort(PORT_SERVER);
+		Netchan_OutOfBandPrint (NS_CLIENT, adr, va("info %i", PROTOCOL_VERSION));
+#endif                
 	}
 
 	noipx = Cvar_Get ("noipx", "0", CVAR_NOSET);
@@ -1437,7 +1447,8 @@ void CL_InitLocal (void)
 	cl_predict = Cvar_Get ("cl_predict", "1", 0);
 //	cl_minfps = Cvar_Get ("cl_minfps", "5", 0);
 	cl_maxfps = Cvar_Get ("cl_maxfps", "90", 0);
-
+	cl_drawfps = Cvar_Get("cl_drawfps","0",CVAR_ARCHIVE); // FPS hack
+	
 	cl_upspeed = Cvar_Get ("cl_upspeed", "200", 0);
 	cl_forwardspeed = Cvar_Get ("cl_forwardspeed", "200", 0);
 	cl_sidespeed = Cvar_Get ("cl_sidespeed", "200", 0);
@@ -1785,7 +1796,7 @@ void CL_Init (void)
 	// all archived variables will now be loaded
 
 	Con_Init ();	
-#if defined __linux__ || defined __sgi
+#if defined __linux__ || defined __FreeBSD__ || defined __sgi
 	S_Init ();	
 	VID_Init ();
 #else

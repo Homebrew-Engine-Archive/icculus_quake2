@@ -39,6 +39,7 @@ FILE	*log_stats_file;
 cvar_t	*host_speeds;
 cvar_t	*log_stats;
 cvar_t	*developer;
+cvar_t	*modder;
 cvar_t	*timescale;
 cvar_t	*fixedtime;
 cvar_t	*logfile_active;	// 1 = buffer log, 2 = flush after each print
@@ -104,7 +105,7 @@ void Com_Printf (char *fmt, ...)
 	char		msg[MAXPRINTMSG];
 
 	va_start (argptr,fmt);
-	vsprintf (msg,fmt,argptr);
+	vsnprintf (msg,MAXPRINTMSG,fmt,argptr);
 	va_end (argptr);
 
 	if (rd_target)
@@ -160,10 +161,34 @@ void Com_DPrintf (char *fmt, ...)
 		return;			// don't confuse non-developers with techie stuff...
 
 	va_start (argptr,fmt);
-	vsprintf (msg,fmt,argptr);
+	vsnprintf (msg,MAXPRINTMSG,fmt,argptr);
 	va_end (argptr);
 	
 	Com_Printf ("%s", msg);
+}
+
+
+/*
+================
+Com_MDPrintf
+
+A Com_Printf that only shows up when either the "modder" or "developer"
+cvars is set
+================
+*/
+void Com_MDPrintf (char *fmt, ...)
+{
+	va_list argptr;
+	char msg[MAXPRINTMSG];
+	
+	if((!modder || !modder->value) && (!developer || !developer->value))
+		return;
+	
+	va_start (argptr,fmt);
+	vsnprintf (msg,MAXPRINTMSG,fmt,argptr);
+	va_end (argptr);
+	
+	Com_Printf("%s", msg);
 }
 
 
@@ -186,7 +211,7 @@ void Com_Error (int code, char *fmt, ...)
 	recursive = true;
 
 	va_start (argptr,fmt);
-	vsprintf (msg,fmt,argptr);
+	vsnprintf (msg,MAXPRINTMSG,fmt,argptr);
 	va_end (argptr);
 	
 	if (code == ERR_DISCONNECT)
@@ -1119,8 +1144,11 @@ void Z_Free (void *ptr)
 
 	z = ((zhead_t *)ptr) - 1;
 
-	if (z->magic != Z_MAGIC)
+	if (z->magic != Z_MAGIC) {
+	  printf( "free: %p failed\n", ptr );
+	  abort();
 		Com_Error (ERR_FATAL, "Z_Free: bad magic");
+	}
 
 	z->prev->next = z->next;
 	z->next->prev = z->prev;
@@ -1183,6 +1211,7 @@ void *Z_TagMalloc (int size, int tag)
 	z_chain.next->prev = z;
 	z_chain.next = z;
 
+	/*	printf( "returning pointer: %p\n", (z+1) );*/
 	return (void *)(z+1);
 }
 
@@ -1443,6 +1472,7 @@ void Qcommon_Init (int argc, char **argv)
 	host_speeds = Cvar_Get ("host_speeds", "0", 0);
 	log_stats = Cvar_Get ("log_stats", "0", 0);
 	developer = Cvar_Get ("developer", "0", 0);
+	modder = Cvar_Get ("modder", "0", 0);
 	timescale = Cvar_Get ("timescale", "1", 0);
 	fixedtime = Cvar_Get ("fixedtime", "0", 0);
 	logfile_active = Cvar_Get ("logfile", "0", 0);

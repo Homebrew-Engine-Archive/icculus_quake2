@@ -345,7 +345,7 @@ BoxOnPlaneSide
 Returns 1, 2, or 1 + 2
 ==================
 */
-#if !id386 || defined __linux__ 
+#if !id386 || defined __linux__ || defined __FreeBSD__
 int BoxOnPlaneSide (vec3_t emins, vec3_t emaxs, struct cplane_s *p)
 {
 	float	dist1, dist2;
@@ -1053,7 +1053,7 @@ char	*va(char *format, ...)
 	static char		string[1024];
 	
 	va_start (argptr, format);
-	vsprintf (string, format,argptr);
+	vsnprintf (string, 1024, format, argptr);
 	va_end (argptr);
 
 	return string;	
@@ -1176,6 +1176,18 @@ void Com_PageInMemory (byte *buffer, int size)
 ============================================================================
 */
 
+/* PATCH: matt */
+/* use our own strncasecmp instead of this implementation */
+#ifdef sun
+
+#define Q_strncasecmp(s1, s2, n) (strncasecmp(s1, s2, n))
+
+int Q_stricmp (char *s1, char *s2) {
+        return strcasecmp(s1, s2);
+}
+
+#else
+
 // FIXME: replace all Q_stricmp with Q_strcasecmp
 int Q_stricmp (char *s1, char *s2)
 {
@@ -1212,6 +1224,7 @@ int Q_strncasecmp (char *s1, char *s2, int n)
 	
 	return 0;		// strings are equal
 }
+#endif
 
 int Q_strcasecmp (char *s1, char *s2)
 {
@@ -1224,10 +1237,10 @@ void Com_sprintf (char *dest, int size, char *fmt, ...)
 {
 	int		len;
 	va_list		argptr;
-	char	bigbuffer[0x10000];
+	static char	bigbuffer[0x10000];
 
 	va_start (argptr,fmt);
-	len = vsprintf (bigbuffer,fmt,argptr);
+	len = vsnprintf (bigbuffer,0x10000,fmt,argptr);
 	va_end (argptr);
 	if (len >= size)
 		Com_Printf ("Com_sprintf: overflow of %i in %i\n", len, size);
