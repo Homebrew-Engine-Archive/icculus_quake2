@@ -26,8 +26,6 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <signal.h>
 #include <sys/mman.h>
 
-#include <asm/io.h>
-
 #include "vga.h"
 #include "vgakeyboard.h"
 #include "vgamouse.h"
@@ -193,7 +191,7 @@ void KBD_Close(void)
 
 static qboolean	UseMouse = true;
 
-static int		mouserate = MOUSE_DEFAULTSAMPLERATE;
+//static int		mouserate = MOUSE_DEFAULTSAMPLERATE;
 
 static int     mouse_buttons;
 static int     mouse_buttonstate;
@@ -201,6 +199,7 @@ static int     mouse_oldbuttonstate;
 static float   mouse_x, mouse_y;
 static float	old_mouse_x, old_mouse_y;
 static int		mx, my;
+static int	mwheel;
 
 static cvar_t	*m_filter;
 static cvar_t	*in_mouse;
@@ -237,17 +236,27 @@ static void RW_IN_MLookUp (void)
 	in_state->IN_CenterView_fp ();
 }
 
+#if 0 /* old definition */
 static void mousehandler(int buttonstate, int dx, int dy)
 {
 	mouse_buttonstate = buttonstate;
 	mx += dx;
 	my += dy;
 }
+#else /* drx is assumed to be the mouse wheel */
+static void mousehandler(int buttonstate, int dx, int dy, int dz, int drx, int dry, int drz)
+{
+	mouse_buttonstate = buttonstate;
+	mx += dx;
+	my += dy;
+	
+	mwheel = drx;
+}
+#endif
 
 void RW_IN_Init(in_state_t *in_state_p)
 {
 	int mtype;
-	int i;
 
 	in_state = in_state_p;
 
@@ -321,12 +330,22 @@ void RW_IN_Commands (void)
 
 	if ((mouse_buttonstate & MOUSE_MIDDLEBUTTON) &&
 		!(mouse_oldbuttonstate & MOUSE_MIDDLEBUTTON))
-		Key_Event_fp (K_MOUSE3, true);
+		in_state->Key_Event_fp (K_MOUSE3, true);
 	else if (!(mouse_buttonstate & MOUSE_MIDDLEBUTTON) &&
 		(mouse_oldbuttonstate & MOUSE_MIDDLEBUTTON))
 		in_state->Key_Event_fp (K_MOUSE3, false);
 
 	mouse_oldbuttonstate = mouse_buttonstate;
+	
+	if (mwheel < 0) {
+		in_state->Key_Event_fp (K_MWHEELUP, true);
+		in_state->Key_Event_fp (K_MWHEELUP, false);
+	}
+	if (mwheel > 0) {
+		in_state->Key_Event_fp (K_MWHEELDOWN, true);
+		in_state->Key_Event_fp (K_MWHEELDOWN, false);
+	}	
+	mwheel = 0;
 }
 
 /*

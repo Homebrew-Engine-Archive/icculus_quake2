@@ -35,6 +35,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <ctype.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#ifdef Joystick
+#include <sys/stat.h>
+#include <fcntl.h>
+#endif
 #include <unistd.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -42,6 +46,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <string.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/mman.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -49,6 +54,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <X11/keysym.h>
 #include <X11/extensions/XShm.h>
 #include <X11/extensions/xf86dga.h>
+
+#ifdef Joystick
+#include <linux/joystick.h>
+#include <glob.h>
+#endif
 
 #include "../ref_soft/r_local.h"
 #include "../client/keys.h"
@@ -64,6 +74,7 @@ static GC				x_gc;
 static Visual			*x_vis;
 static XVisualInfo		*x_visinfo;
 static int win_x, win_y;
+static Atom wmDeleteWindow;
 
 #define KEY_MASK (KeyPressMask | KeyReleaseMask)
 #define MOUSE_MASK (ButtonPressMask | ButtonReleaseMask | \
@@ -166,15 +177,15 @@ PIXEL24 xlib_rgb24(int r,int g,int b)
 
 void st2_fixup( XImage *framebuf, int x, int y, int width, int height)
 {
-	int xi,yi;
-	unsigned char *src;
+	int yi;
+	byte *src;
 	PIXEL16 *dest;
 	register int count, n;
 
 	if( (x<0)||(y<0) )return;
 
 	for (yi = y; yi < (y+height); yi++) {
-		src = &framebuf->data [yi * framebuf->bytes_per_line];
+		src = (byte *)&framebuf->data [yi * framebuf->bytes_per_line];
 
 		// Duff's Device
 		count = width;
@@ -202,15 +213,15 @@ void st2_fixup( XImage *framebuf, int x, int y, int width, int height)
 
 void st3_fixup( XImage *framebuf, int x, int y, int width, int height)
 {
-	int xi,yi;
-	unsigned char *src;
+	int yi;
+	byte *src;
 	PIXEL24 *dest;
 	register int count, n;
 
 	if( (x<0)||(y<0) )return;
 
 	for (yi = y; yi < (y+height); yi++) {
-		src = &framebuf->data [yi * framebuf->bytes_per_line];
+		src = (byte *)&framebuf->data [yi * framebuf->bytes_per_line];
 
 		// Duff's Device
 		count = width;
@@ -262,6 +273,13 @@ static cvar_t	*in_dgamouse;
 static cvar_t	*vid_xpos;			// X coordinate of window position
 static cvar_t	*vid_ypos;			// Y coordinate of window position
 
+#ifdef Joystick
+static cvar_t   *in_joystick;
+static qboolean joystick_avail = false;
+static int joy_fd, jx, jy, jt;
+static cvar_t   *j_invert_y;
+#endif
+
 static qboolean	mlooking;
 
 // state struct passed in Init
@@ -274,6 +292,8 @@ static cvar_t *m_yaw;
 static cvar_t *m_pitch;
 static cvar_t *m_forward;
 static cvar_t *freelook;
+
+static Time myxtime;
 
 static void Force_CenterView_f (void)
 {
@@ -291,17 +311,61 @@ static void RW_IN_MLookUp (void)
 	in_state->IN_CenterView_fp ();
 }
 
+#ifdef Joystick
+void InitJoystick() {
+  int i, err;
+  glob_t pglob;
+  struct js_event e;
+
+  joystick_avail = false;
+  err = glob("/dev/js*", 0, NULL, &pglob);
+  
+  if (err) {
+    switch (err) {
+    case GLOB_NOSPACE:
+      ri.Con_Printf(PRINT_ALL, "Error, out of memory while looking for joysticks\n");
+      break;
+    case GLOB_NOMATCH:
+      ri.Con_Printf(PRINT_ALL, "No joysticks found\n");
+      break;
+    default:
+      ri.Con_Printf(PRINT_ALL, "Error #%d while looking for joysticks\n",err);
+    }
+    return;
+  }  
+  
+  for (i=0;i<pglob.gl_pathc;i++) {
+    ri.Con_Printf(PRINT_ALL, "Trying joystick dev %s\n", pglob.gl_pathv[i]);
+    joy_fd = open (pglob.gl_pathv[i], O_RDONLY | O_NONBLOCK);
+    if (joy_fd == -1) {
+      ri.Con_Printf(PRINT_ALL, "Error opening joystick dev %s\n", 
+		    pglob.gl_pathv[i]);
+    }
+    else {
+      while (read(joy_fd, &e, sizeof(struct js_event))!=-1 &&
+	     (e.type & JS_EVENT_INIT))
+	ri.Con_Printf(PRINT_ALL, "Read init event\n");
+      ri.Con_Printf(PRINT_ALL, "Using joystick dev %s\n", pglob.gl_pathv[i]);
+      joystick_avail = true;
+      return;
+    }
+  }
+  globfree(&pglob);
+}
+#endif
+
 void RW_IN_Init(in_state_t *in_state_p)
 {
-	int mtype;
-	int i;
-
 	in_state = in_state_p;
 
 	// mouse variables
 	m_filter = ri.Cvar_Get ("m_filter", "0", 0);
-    in_mouse = ri.Cvar_Get ("in_mouse", "0", CVAR_ARCHIVE);
-    in_dgamouse = ri.Cvar_Get ("in_dgamouse", "1", CVAR_ARCHIVE);
+	in_mouse = ri.Cvar_Get ("in_mouse", "0", CVAR_ARCHIVE);
+	in_dgamouse = ri.Cvar_Get ("in_dgamouse", "1", CVAR_ARCHIVE);
+#ifdef Joystick
+	in_joystick = ri.Cvar_Get ("in_joystick", "1", CVAR_ARCHIVE);
+	j_invert_y = ri.Cvar_Get ("j_invert_y", "1", CVAR_ARCHIVE);
+#endif
 	freelook = ri.Cvar_Get( "freelook", "0", 0 );
 	lookstrafe = ri.Cvar_Get ("lookstrafe", "0", 0);
 	sensitivity = ri.Cvar_Get ("sensitivity", "3", 0);
@@ -315,13 +379,14 @@ void RW_IN_Init(in_state_t *in_state_p)
 
 	ri.Cmd_AddCommand ("force_centerview", Force_CenterView_f);
 
-	mouse_avail = true;
+	mouse_avail = true;	
+
+#ifdef Joystick
+	if (in_joystick)
+	  InitJoystick();
+#endif
 }
 
-void RW_IN_Shutdown(void)
-{
-	mouse_avail = false;
-}
 
 /*
 ===========
@@ -331,18 +396,49 @@ IN_Commands
 void RW_IN_Commands (void)
 {
 	int i;
-   
-	if (!mouse_avail) 
-		return;
-   
-	for (i=0 ; i<3 ; i++) {
-		if ( (mouse_buttonstate & (1<<i)) && !(mouse_oldbuttonstate & (1<<i)) )
-			in_state->Key_Event_fp (K_MOUSE1 + i, true);
-
-		if ( !(mouse_buttonstate & (1<<i)) && (mouse_oldbuttonstate & (1<<i)) )
-			in_state->Key_Event_fp (K_MOUSE1 + i, false);
+#ifdef Joystick
+	struct js_event e;
+	int key_index;
+#endif
+	if (mouse_avail) { 
+	  for (i=0 ; i<3 ; i++) {
+	    if ( (mouse_buttonstate & (1<<i)) && !(mouse_oldbuttonstate & (1<<i)) )
+	      in_state->Key_Event_fp (K_MOUSE1 + i, true);
+	    
+	    if ( !(mouse_buttonstate & (1<<i)) && (mouse_oldbuttonstate & (1<<i)) )
+	      in_state->Key_Event_fp (K_MOUSE1 + i, false);
+	  }
+	  mouse_oldbuttonstate = mouse_buttonstate;
 	}
-	mouse_oldbuttonstate = mouse_buttonstate;
+#ifdef Joystick
+	if (joystick_avail) {
+	  while (read(joy_fd, &e, sizeof(struct js_event))!=-1) {
+	    if (JS_EVENT_BUTTON & e.type) {
+	      key_index = (e.number < 4) ? K_JOY1 : K_AUX1;
+	      if (e.value) {
+		in_state->Key_Event_fp (key_index + e.number, true);
+	      }
+	      else {
+		in_state->Key_Event_fp (key_index + e.number, false);
+	      }
+	      //joy_oldbuttonstate = e.number;
+	    }
+	    else if (JS_EVENT_AXIS & e.type) {
+	      switch (e.number) {
+	      case 0:
+		jx = e.value;
+		break;
+	      case 1:
+		jy = e.value;
+		break;
+	      case 3:
+		jt = e.value;
+		break;
+	      }
+	    }
+	  }
+	}
+#endif
 }
 
 /*
@@ -352,38 +448,61 @@ IN_Move
 */
 void RW_IN_Move (usercmd_t *cmd)
 {
-	if (!mouse_avail)
-		return;
-   
-	if (m_filter->value)
-	{
-		mx = (mx + old_mouse_x) * 0.5;
-		my = (my + old_mouse_y) * 0.5;
-	}
-
-	old_mouse_x = mx;
-	old_mouse_y = my;
-
-	mx *= sensitivity->value;
-	my *= sensitivity->value;
-
-// add mouse X/Y movement to cmd
-	if ( (*in_state->in_strafe_state & 1) || 
-		(lookstrafe->value && mlooking ))
-		cmd->sidemove += m_side->value * mx;
+  if (mouse_avail) {
+    if (m_filter->value)
+      {
+	mx = (mx + old_mouse_x) * 0.5;
+	my = (my + old_mouse_y) * 0.5;
+      }
+    
+    old_mouse_x = mx;
+    old_mouse_y = my;
+    
+    mx *= sensitivity->value;
+    my *= sensitivity->value;
+    
+    // add mouse X/Y movement to cmd
+    if ( (*in_state->in_strafe_state & 1) || 
+	 (lookstrafe->value && mlooking ))
+      cmd->sidemove += m_side->value * mx;
+    else
+      in_state->viewangles[YAW] -= m_yaw->value * mx;
+    
+    if ( (mlooking || freelook->value) && 
+	 !(*in_state->in_strafe_state & 1))
+      {
+	in_state->viewangles[PITCH] += m_pitch->value * my;
+      }
+    else
+      {
+	cmd->forwardmove -= m_forward->value * my;
+      }
+    mx = my = 0;
+  }    
+#ifdef Joystick
+  if (joystick_avail) {
+    // add joy X/Y movement to cmd
+    if ( (*in_state->in_strafe_state & 1) || 
+	 (lookstrafe->value && mlooking ))
+      cmd->sidemove += m_side->value * (jx/100);
+    else
+      in_state->viewangles[YAW] -= m_yaw->value * (jx/100);
+    
+    if ( (mlooking || freelook->value) && 
+	 !(*in_state->in_strafe_state & 1))
+      {
+	if (j_invert_y)
+	  in_state->viewangles[PITCH] -= m_pitch->value * (jy/100);
 	else
-		in_state->viewangles[YAW] -= m_yaw->value * mx;
-
-	if ( (mlooking || freelook->value) && 
-		!(*in_state->in_strafe_state & 1))
-	{
-		in_state->viewangles[PITCH] += m_pitch->value * my;
-	}
-	else
-	{
-		cmd->forwardmove -= m_forward->value * my;
-	}
-	mx = my = 0;
+	  in_state->viewangles[PITCH] += m_pitch->value * (jy/100);
+	cmd->forwardmove -= m_forward->value * (jt/100);
+      }
+    else
+      {
+	cmd->forwardmove -= m_forward->value * (jy/100);
+      }
+  }
+#endif
 }
 
 // ========================================================================
@@ -504,7 +623,64 @@ void RW_IN_Activate(qboolean active)
 	if (active)
 		IN_ActivateMouse();
 	else
-		IN_DeactivateMouse ();
+		IN_DeactivateMouse();
+}
+
+void RW_IN_Shutdown(void)
+{
+	if (mouse_avail) {
+		RW_IN_Activate (false);
+		
+		mouse_avail = false;
+		
+		ri.Cmd_RemoveCommand ("+mlook");
+		ri.Cmd_RemoveCommand ("-mlook");
+		ri.Cmd_RemoveCommand ("force_centerview");
+	}
+}
+
+/*****************************************************************************/
+
+char *RW_Sys_GetClipboardData()
+{
+	Window sowner;
+	Atom type, property;
+	unsigned long len, bytes_left, tmp;
+	unsigned char *data;
+	int format, result;
+	char *ret = NULL;
+			
+	sowner = XGetSelectionOwner(dpy, XA_PRIMARY);
+			
+	if (sowner != None) {
+		property = XInternAtom(dpy,
+				       "GETCLIPBOARDDATA_PROP",
+				       False);
+				
+		XConvertSelection(dpy,
+				  XA_PRIMARY, XA_STRING,
+				  property, win, myxtime); /* myxtime == time of last X event */
+		XFlush(dpy);
+
+		XGetWindowProperty(dpy,
+				   win, property,
+				   0, 0, False, AnyPropertyType,
+				   &type, &format, &len,
+				   &bytes_left, &data);
+		if (bytes_left > 0) {
+			result =
+			XGetWindowProperty(dpy,
+					   win, property,
+					   0, bytes_left, True, AnyPropertyType,
+					   &type, &format, &len,
+					   &tmp, &data);
+			if (result == Success) {
+				ret = strdup(data);
+			}
+			XFree(data);
+		}
+	}
+	return ret;
 }
 
 /*****************************************************************************/
@@ -734,6 +910,8 @@ int XLateKey(XKeyEvent *ev)
 			key = *(unsigned char*)buf;
 			if (key >= 'A' && key <= 'Z')
 				key = key - 'A' + 'a';
+			if (key >= 1 && key <= 26) /* ctrl+alpha */
+				key = key + 'a' - 1;
 			break;
 	} 
 
@@ -754,6 +932,7 @@ void HandleEvents(void)
 
 		switch(event.type) {
 		case KeyPress:
+			myxtime = event.xkey.time;
 		case KeyRelease:
 			if (in_state && in_state->Key_Event_fp)
 				in_state->Key_Event_fp (XLateKey(&event.xkey), event.type == KeyPress);
@@ -783,10 +962,9 @@ void HandleEvents(void)
 			}
 			break;
 
-
-			break;
-
 		case ButtonPress:
+			myxtime = event.xbutton.time;
+			
 			b=-1;
 			if (event.xbutton.button == 1)
 				b = 0;
@@ -794,6 +972,10 @@ void HandleEvents(void)
 				b = 2;
 			else if (event.xbutton.button == 3)
 				b = 1;
+			else if (event.xbutton.button == 4)
+				in_state->Key_Event_fp (K_MWHEELUP, 1);
+			else if (event.xbutton.button == 5)
+				in_state->Key_Event_fp (K_MWHEELDOWN, 1);
 			if (b>=0)
 				mouse_buttonstate |= 1<<b;
 			break;
@@ -806,6 +988,10 @@ void HandleEvents(void)
 				b = 2;
 			else if (event.xbutton.button == 3)
 				b = 1;
+			else if (event.xbutton.button == 4)
+				in_state->Key_Event_fp (K_MWHEELUP, 0);
+			else if (event.xbutton.button == 5)
+				in_state->Key_Event_fp (K_MWHEELDOWN, 0);
 			if (b>=0)
 				mouse_buttonstate &= ~(1<<b);
 			break;
@@ -834,6 +1020,10 @@ void HandleEvents(void)
 			config_notify = 1;
 			break;
 
+		case ClientMessage:
+			if (event.xclient.data.l[0] == wmDeleteWindow)
+				ri.Cmd_ExecuteText(EXEC_NOW, "quit");
+			break;
 		default:
 			if (doShm && event.type == x_shmeventtype)
 				oktodraw = true;
@@ -863,7 +1053,7 @@ int SWimp_Init( void *hInstance, void *wndProc )
 	vid_ypos = ri.Cvar_Get ("vid_ypos", "22", CVAR_ARCHIVE);
 
 // open the display
-	dpy = XOpenDisplay(0);
+	dpy = XOpenDisplay(NULL);
 	if (!dpy)
 	{
 		if (getenv("DISPLAY"))
@@ -898,11 +1088,12 @@ int SWimp_Init( void *hInstance, void *wndProc )
 */
 static qboolean SWimp_InitGraphics( qboolean fullscreen )
 {
-	int pnum, i;
+	int i;
 	XVisualInfo template;
 	int num_visuals;
 	int template_mask;
 	Window root;
+	//int pnum;
 
 	srandom(getpid());
 
@@ -974,6 +1165,8 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 	{
 	   int attribmask = CWEventMask  | CWColormap | CWBorderPixel;
 	   XSetWindowAttributes attribs;
+	   XSizeHints *sizehints;
+	   XWMHints *wmhints;
 	   Colormap tmpcmap;
 	   
 	   tmpcmap = XCreateColormap(dpy, root, x_vis, AllocNone);
@@ -986,8 +1179,51 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 		win = XCreateWindow(dpy, root, (int)vid_xpos->value, (int)vid_ypos->value, 
 			vid.width, vid.height, 0, x_visinfo->depth, InputOutput, x_vis, 
 			attribmask, &attribs );
+		
+		sizehints = XAllocSizeHints();
+		if (sizehints) {
+			sizehints->min_width = vid.width;
+			sizehints->min_height = vid.height;
+			sizehints->max_width = vid.width;
+			sizehints->max_height = vid.height;
+			sizehints->base_width = vid.width;
+			sizehints->base_height = vid.height;
+			
+			sizehints->flags = PMinSize | PMaxSize | PBaseSize;
+		}
+		
+		wmhints = XAllocWMHints();
+		if (wmhints) {
+			#include "q2icon.xbm"
+
+			Pixmap icon_pixmap, icon_mask;
+			unsigned long fg, bg;
+			int i;
+		
+			fg = BlackPixel(dpy, x_visinfo->screen);
+			bg = WhitePixel(dpy, x_visinfo->screen);
+			icon_pixmap = XCreatePixmapFromBitmapData(dpy, win, (char *)q2icon_bits, q2icon_width, q2icon_height, fg, bg, x_visinfo->depth);
+			for (i = 0; i < sizeof(q2icon_bits); i++)
+				q2icon_bits[i] = ~q2icon_bits[i];
+			icon_mask = XCreatePixmapFromBitmapData(dpy, win, (char *)q2icon_bits, q2icon_width, q2icon_height, bg, fg, x_visinfo->depth); 
+		
+			wmhints->flags = IconPixmapHint|IconMaskHint;
+			wmhints->icon_pixmap = icon_pixmap;
+			wmhints->icon_mask = icon_mask;
+		}
+
+		XSetWMProperties(dpy, win, NULL, NULL, NULL, 0,
+			sizehints, wmhints, None);
+		if (sizehints)
+			XFree(sizehints);
+		if (wmhints)
+			XFree(wmhints);
+			
 		XStoreName(dpy, win, "Quake II");
 
+		wmDeleteWindow = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+		XSetWMProtocols(dpy, win, &wmDeleteWindow, 1);
+		
 		if (x_visinfo->class != TrueColor)
 			XFreeColormap(dpy, tmpcmap);
 	}
@@ -1016,7 +1252,6 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 
 // wait for first exposure event
 	{
-		XEvent event;
 		exposureflag = false;
 		do
 		{
@@ -1033,11 +1268,16 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 		displayname = (char *) getenv("DISPLAY");
 		if (displayname)
 		{
-			char *d = displayname;
+			char *dptr = strdup(displayname);
+			char *d;
+			
+			d = dptr;
 			while (*d && (*d != ':')) d++;
 			if (*d) *d = 0;
 			if (!(!strcasecmp(displayname, "unix") || !*displayname))
 				doShm = false;
+			
+			free(dptr);
 		}
 	}
 
@@ -1051,7 +1291,7 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 
 	current_framebuffer = 0;
 	vid.rowbytes = x_framebuffer[0]->bytes_per_line;
-	vid.buffer = x_framebuffer[0]->data;
+	vid.buffer = (byte *)x_framebuffer[0]->data;
 
 //	XSynchronize(dpy, False);
 
@@ -1103,7 +1343,7 @@ void SWimp_EndFrame (void)
 		while (!oktodraw) 
 			HandleEvents();
 		current_framebuffer = !current_framebuffer;
-		vid.buffer = x_framebuffer[current_framebuffer]->data;
+		vid.buffer = (byte *)x_framebuffer[current_framebuffer]->data;
 		XSync(dpy, False);
 	}
 	else
@@ -1159,8 +1399,8 @@ void SWimp_SetPalette( const unsigned char *palette )
 	if (!X11_active)
 		return;
 
-    if ( !palette )
-        palette = ( const unsigned char * ) sw_state.currentpalette;
+	if ( !palette )
+		palette = ( const unsigned char * ) sw_state.currentpalette;
  
 	for(i=0;i<256;i++) {
 		st2d_8to16table[i]= xlib_rgb16(palette[i*4], palette[i*4+1],palette[i*4+2]);
@@ -1210,6 +1450,8 @@ void SWimp_Shutdown( void )
 
 	XDestroyWindow(	dpy, win );
 
+	win = 0;
+	
 //	XAutoRepeatOn(dpy);
 //	XCloseDisplay(dpy);
 
@@ -1269,5 +1511,4 @@ void KBD_Update(void)
 void KBD_Close(void)
 {
 }
-
 
