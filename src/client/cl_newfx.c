@@ -28,6 +28,23 @@ extern cvar_t		*vid_ref;
 
 extern void MakeNormalVectors (vec3_t forward, vec3_t right, vec3_t up);
 
+#ifdef QMAX
+cparticle_t *setupParticle (
+			float angle0,		float angle1,		float angle2,
+			float org0,			float org1,			float org2,
+			float vel0,			float vel1,			float vel2,
+			float accel0,		float accel1,		float accel2,
+			float color0,		float color1,		float color2,
+			float colorvel0,	float colorvel1,	float colorvel2,
+			float alpha,		float alphavel,
+			float size,			float sizevel,			
+			int	image,
+			int flags,
+			void (*think)(cparticle_t *p, vec3_t org, vec3_t angle, float *alpha, float *size, int *image, float *time),
+			qboolean thinknext);
+
+#endif
+
 
 /*
 ======
@@ -150,7 +167,20 @@ void CL_DebugTrail (vec3_t start, vec3_t end)
 	while (len > 0)
 	{
 		len -= dec;
-
+#ifdef QMAX
+		setupParticle (
+			0,	0,	0,
+			move[0],	move[1],	move[2],
+			0,	0,	0,
+			0,		0,		0,
+			50,	50,	255,
+			0,	0,	0,
+			1,		-0.75,
+			7.5,			0,			
+			particle_generic,
+			0,
+			NULL,0);
+#else
 		if (!free_particles)
 			return;
 		p = free_particles;
@@ -166,14 +196,13 @@ void CL_DebugTrail (vec3_t start, vec3_t end)
 //		p->alphavel = 0;
 		p->color = 0x74 + (rand()&7);
 		VectorCopy (move, p->org);
-/*
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = move[j] + crand()*2;
 			p->vel[j] = crand()*3;
 			p->accel[j] = 0;
 		}
-*/
+#endif
 		VectorAdd (move, vec, move);
 	}
 
@@ -215,7 +244,9 @@ void CL_SmokeTrail (vec3_t start, vec3_t end, int colorStart, int colorRun, int 
 
 		p->alpha = 1.0;
 		p->alphavel = -1.0 / (1+frand()*0.5);
+#ifndef QMAX
 		p->color = colorStart + (rand() % colorRun);
+#endif
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = move[j] + crand()*3;
@@ -227,10 +258,13 @@ void CL_SmokeTrail (vec3_t start, vec3_t end, int colorStart, int colorRun, int 
 	}
 }
 
-void CL_ForceWall (vec3_t start, vec3_t end, int color)
+void CL_ForceWall (vec3_t start, vec3_t end, int color8)
 {
 	vec3_t		move;
 	vec3_t		vec;
+	vec3_t color = { color8red(color8), color8green(color8), color8blue(color8)};
+
+
 	float		len;
 	int			j;
 	cparticle_t	*p;
@@ -251,25 +285,41 @@ void CL_ForceWall (vec3_t start, vec3_t end, int color)
 		
 		if (frand() > 0.3)
 		{
-			p = free_particles;
-			free_particles = p->next;
-			p->next = active_particles;
-			active_particles = p;
-			VectorClear (p->accel);
-			
-			p->time = cl.time;
+#ifdef QMAX
+		  setupParticle (
+				 0,	0,	0,
+				 move[0] + crand()*3,	move[1] + crand()*3,	move[2] + crand()*3,
+				 0,	0,	-40 - (crand()*10),
+				 0,		0,		0,
+				 color[0]+5,	color[1]+5,	color[2]+5,
+				 0,	0,	0,
+				 1,		-1.0 / (3.0+frand()*0.5),
+				 5,			0,			
+				 particle_generic,
+				 0,
+				 NULL,0);
+#else	
+		  p = free_particles;
+		  free_particles = p->next;
+		  p->next = active_particles;
+		  active_particles = p;
+		  VectorClear (p->accel);
+		  
+		  p->time = cl.time;
+		  
+		  p->alpha = 1.0;
+		  p->alphavel =  -1.0 / (3.0+frand()*0.5);
+		  p->color = color;
+		  for (j=0 ; j<3 ; j++)
+		    {
+		      p->org[j] = move[j] + crand()*3;
+		      p->accel[j] = 0;
+		    }
+		  p->vel[0] = 0;
+		  p->vel[1] = 0;
+		  p->vel[2] = -40 - (crand()*10);
+#endif
 
-			p->alpha = 1.0;
-			p->alphavel =  -1.0 / (3.0+frand()*0.5);
-			p->color = color;
-			for (j=0 ; j<3 ; j++)
-			{
-				p->org[j] = move[j] + crand()*3;
-				p->accel[j] = 0;
-			}
-			p->vel[0] = 0;
-			p->vel[1] = 0;
-			p->vel[2] = -40 - (crand()*10);
 		}
 
 		VectorAdd (move, vec, move);
@@ -299,7 +349,9 @@ void CL_FlameEffects (centity_t *ent, vec3_t origin)
 
 		p->alpha = 1.0;
 		p->alphavel = -1.0 / (1+frand()*0.2);
+#ifndef QMAX
 		p->color = 226 + (rand() % 4);
+#endif
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = origin[j] + crand()*5;
@@ -325,7 +377,9 @@ void CL_FlameEffects (centity_t *ent, vec3_t origin)
 
 		p->alpha = 1.0;
 		p->alphavel = -1.0 / (1+frand()*0.5);
+#ifndef QMAX
 		p->color = 0 + (rand() % 4);
+#endif		
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = origin[j] + crand()*3;
@@ -357,11 +411,12 @@ void CL_GenericParticleEffect (vec3_t org, vec3_t dir, int color, int count, int
 		active_particles = p;
 
 		p->time = cl.time;
+#ifndef QMAX
 		if (numcolors > 1)
-			p->color = color + (rand() & numcolors);
+		  p->color = color + (rand() & numcolors);
 		else
-			p->color = color;
-
+		  p->color = color;
+#endif
 		d = rand() & dirspread;
 		for (j=0 ; j<3 ; j++)
 		{
@@ -403,9 +458,23 @@ void CL_BubbleTrail2 (vec3_t start, vec3_t end, int dist)
 
 	for (i=0 ; i<len ; i+=dec)
 	{
+#ifdef QMAX
+		setupParticle (
+			0,	0,	0,
+			move[0]+crand()*2,	move[1]+crand()*2,	move[2]+crand()*2,
+			crand()*5,	crand()*5,	crand()*5+6,
+			0,		0,		0,
+			255,	255,	255,
+			0,	0,	0,
+			0.75,		-1.0 / (1 + frand() * 0.2),
+			(frand()>0.25)? 1 : (frand()>0.5) ? 2 : (frand()>0.75) ? 3 : 4,			1,			
+			particle_bubble,
+			PART_TRANS|PART_SHADED,
+			NULL,0);
+#else
 		if (!free_particles)
-			return;
-
+		  return;
+		
 		p = free_particles;
 		free_particles = p->next;
 		p->next = active_particles;
@@ -425,7 +494,7 @@ void CL_BubbleTrail2 (vec3_t start, vec3_t end, int dist)
 		p->org[2] -= 4;
 //		p->vel[2] += 6;
 		p->vel[2] += 20;
-
+#endif
 		VectorAdd (move, vec, move);
 	}
 }
@@ -492,7 +561,9 @@ void CL_Heatbeam (vec3_t start, vec3_t end)
 			p->alphavel = INSTANT_PARTICLE;
 	//		p->color = 0x74 + (rand()&7);
 //			p->color = 223 - (rand()&7);
+#ifndef QMAX
 			p->color = 223;
+#endif
 //			p->color = 240;
 
 			// trim it so it looks like it's starting at the origin
@@ -506,13 +577,27 @@ void CL_Heatbeam (vec3_t start, vec3_t end)
 				VectorScale (right, c*k, dir);
 				VectorMA (dir, s*k, up, dir);
 			}
-			
+#ifdef QMAX
+			setupParticle (
+				       0,	0,	0,
+				       move[0]+dir[0]*3,	move[1]+dir[1]*3,	move[2]+dir[2]*3,
+				       0,	0,	0,
+				       0,		0,		0,
+				       200+rand()*50,	200+rand()*25,	rand()*50,
+				       0,	0,	0,
+				       0.5,		-1000.0,
+				       3,			1,			
+				       particle_blaster,
+				       0,
+				       NULL,0);	
+#else		
 			for (j=0 ; j<3 ; j++)
 			{
 				p->org[j] = move[j] + dir[j]*3;
 	//			p->vel[j] = dir[j]*6;
 				p->vel[j] = 0;
 			}
+#endif
 #ifdef DOUBLE_SCREW
 		}
 #endif
@@ -607,7 +692,9 @@ void CL_Heatbeam (vec3_t start, vec3_t forward)
 	//		p->alphavel = -1.0 / (1+frand()*0.2);
 			p->alphavel = -1000.0;
 	//		p->color = 0x74 + (rand()&7);
+#ifndef QMAX
 			p->color = 223 - (rand()&7);
+#endif
 			for (j=0 ; j<3 ; j++)
 			{
 				p->org[j] = move[j] + dir[j]*3;
@@ -666,8 +753,9 @@ void CL_Heatbeam (vec3_t start, vec3_t end)
 
 		p->alpha = 1.0;
 		p->alphavel = -5.0 / (1+frand());
+#ifndef QMAX
 		p->color = 223 - (rand()&7);
-
+#endif
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = move[j];
@@ -725,7 +813,9 @@ void CL_Heatbeam (vec3_t start, vec3_t end)
 	//		p->alphavel = -1.0 / (1+frand()*0.2);
 			p->alphavel = -1000.0;
 	//		p->color = 0x74 + (rand()&7);
+#ifndef QMAX
 			p->color = 223 - (rand()&7);
+#endif
 			for (j=0 ; j<3 ; j++)
 			{
 				p->org[j] = move[j] + dir[j]*3;
@@ -768,8 +858,9 @@ void CL_ParticleSteamEffect (vec3_t org, vec3_t dir, int color, int count, int m
 		active_particles = p;
 
 		p->time = cl.time;
+#ifndef QMAX
 		p->color = color + (rand()&7);
-
+#endif
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = org[j] + magnitude*0.1*crand();
@@ -814,8 +905,9 @@ void CL_ParticleSteamEffect2 (cl_sustain_t *self)
 		active_particles = p;
 
 		p->time = cl.time;
+#ifndef QMAX
 		p->color = self->color + (rand()&7);
-
+#endif
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = self->org[j] + self->magnitude*0.1*crand();
@@ -880,7 +972,9 @@ void CL_TrackerTrail (vec3_t start, vec3_t end, int particleColor)
 
 		p->alpha = 1.0;
 		p->alphavel = -2.0;
+#ifndef QMAX
 		p->color = particleColor;
+#endif
 		dist = DotProduct(move, forward);
 		VectorMA(move, 8 * cos(dist), up, p->org);
 		for (j=0 ; j<3 ; j++)
@@ -915,8 +1009,9 @@ void CL_Tracker_Shell(vec3_t origin)
 
 		p->alpha = 1.0;
 		p->alphavel = INSTANT_PARTICLE;
+#ifndef QMAX
 		p->color = 0;
-
+#endif
 		dir[0] = crand();
 		dir[1] = crand();
 		dir[2] = crand();
@@ -946,8 +1041,9 @@ void CL_MonsterPlasma_Shell(vec3_t origin)
 
 		p->alpha = 1.0;
 		p->alphavel = INSTANT_PARTICLE;
+#ifndef QMAX
 		p->color = 0xe0;
-
+#endif
 		dir[0] = crand();
 		dir[1] = crand();
 		dir[2] = crand();
@@ -982,8 +1078,9 @@ void CL_Widowbeamout (cl_sustain_t *self)
 
 		p->alpha = 1.0;
 		p->alphavel = INSTANT_PARTICLE;
+#ifndef QMAX
 		p->color = colortable[rand()&3];
-
+#endif
 		dir[0] = crand();
 		dir[1] = crand();
 		dir[2] = crand();
@@ -1018,8 +1115,9 @@ void CL_Nukeblast (cl_sustain_t *self)
 
 		p->alpha = 1.0;
 		p->alphavel = INSTANT_PARTICLE;
+#ifndef QMAX
 		p->color = colortable[rand()&3];
-
+#endif
 		dir[0] = crand();
 		dir[1] = crand();
 		dir[2] = crand();
@@ -1047,8 +1145,9 @@ void CL_WidowSplash (vec3_t org)
 		active_particles = p;
 
 		p->time = cl.time;
+#ifndef QMAX
 		p->color = colortable[rand()&3];
-
+#endif
 		dir[0] = crand();
 		dir[1] = crand();
 		dir[2] = crand();
@@ -1084,8 +1183,9 @@ void CL_Tracker_Explode(vec3_t	origin)
 
 		p->alpha = 1.0;
 		p->alphavel = -1.0;
+#ifndef QMAX
 		p->color = 0;
-
+#endif
 		dir[0] = crand();
 		dir[1] = crand();
 		dir[2] = crand();
@@ -1136,7 +1236,9 @@ void CL_TagTrail (vec3_t start, vec3_t end, float color)
 
 		p->alpha = 1.0;
 		p->alphavel = -1.0 / (0.8+frand()*0.2);
+#ifndef QMAX
 		p->color = color;
+#endif
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = move[j] + crand()*16;
@@ -1153,13 +1255,27 @@ void CL_TagTrail (vec3_t start, vec3_t end, float color)
 CL_ColorExplosionParticles
 ===============
 */
-void CL_ColorExplosionParticles (vec3_t org, int color, int run)
+void CL_ColorExplosionParticles (vec3_t org, int color8, int run)
 {
 	int			i, j;
 	cparticle_t	*p;
-
+	vec3_t color = { color8red(color8), color8green(color8), color8blue(color8)};
 	for (i=0 ; i<128 ; i++)
 	{
+#ifdef QMAX
+setupParticle (
+			0,	0,	0,
+			org[0] + ((rand()%32)-16),	org[1] + ((rand()%32)-16),	org[2] + ((rand()%32)-16),
+			(rand()%256)-128,	(rand()%256)-128,	(rand()%256)-128,
+			0,		0,		20,
+			color[0] + (rand() % run),	color[1] + (rand() % run),	color[2] + (rand() % run),
+			0,	0,	0,
+			1.0,		-0.4 / (0.6 + frand()*0.2),
+			2,			1,			
+			particle_generic,
+			0,
+			NULL,0);
+#else
 		if (!free_particles)
 			return;
 		p = free_particles;
@@ -1169,7 +1285,6 @@ void CL_ColorExplosionParticles (vec3_t org, int color, int run)
 
 		p->time = cl.time;
 		p->color = color + (rand() % run);
-
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = org[j] + ((rand()%32)-16);
@@ -1181,6 +1296,7 @@ void CL_ColorExplosionParticles (vec3_t org, int color, int run)
 		p->alpha = 1.0;
 
 		p->alphavel = -0.4 / (0.6 + frand()*0.2);
+#endif
 	}
 }
 
@@ -1189,6 +1305,14 @@ void CL_ColorExplosionParticles (vec3_t org, int color, int run)
 CL_ParticleSmokeEffect - like the steam effect, but unaffected by gravity
 ===============
 */
+#ifdef QMAX
+void pRotateThink (cparticle_t *p, vec3_t org, vec3_t angle, float *alpha, float *size, int *image, float *time)
+{
+	angle[2] =	angle[0] + *time*angle[1] + *time**time*angle[2];
+	p->thinknext=true;
+}
+#endif
+
 void CL_ParticleSmokeEffect (vec3_t org, vec3_t dir, int color, int count, int magnitude)
 {
 	int			i, j;
@@ -1208,8 +1332,9 @@ void CL_ParticleSmokeEffect (vec3_t org, vec3_t dir, int color, int count, int m
 		active_particles = p;
 
 		p->time = cl.time;
+#ifndef QMAX
 		p->color = color + (rand()&7);
-
+#endif
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = org[j] + magnitude*0.1*crand();
@@ -1253,8 +1378,9 @@ void CL_BlasterParticles2 (vec3_t org, vec3_t dir, unsigned int color)
 		active_particles = p;
 
 		p->time = cl.time;
+#ifndef QMAX
 		p->color = color + (rand()&7);
-
+#endif
 		d = rand()&15;
 		for (j=0 ; j<3 ; j++)
 		{
@@ -1310,7 +1436,9 @@ void CL_BlasterTrail2 (vec3_t start, vec3_t end)
 
 		p->alpha = 1.0;
 		p->alphavel = -1.0 / (0.3+frand()*0.2);
+#ifndef QMAX
 		p->color = 0xd0;
+#endif
 		for (j=0 ; j<3 ; j++)
 		{
 			p->org[j] = move[j] + crand();

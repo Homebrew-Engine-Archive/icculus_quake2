@@ -27,34 +27,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 ** QGL_Init() - loads libraries, assigns function pointers, etc.
 ** QGL_Shutdown() - unloads libraries, NULLs function pointers
 */
-#include <float.h>
 #include "../ref_gl/gl_local.h"
 #include "glw_linux.h"
 
-//#include <GL/fxmesa.h>
-#include <GL/glx.h>
-
 #include <dlfcn.h>
 
-const char so_file[] = "/etc/quake2.conf";
+#ifdef QMAX
+qboolean have_stencil = false;
+#endif
 
-/*
-//FX Mesa Functions
-fxMesaContext (*qfxMesaCreateContext)(GLuint win, GrScreenResolution_t, GrScreenRefresh_t, const GLint attribList[]);
-fxMesaContext (*qfxMesaCreateBestContext)(GLuint win, GLint width, GLint height, const GLint attribList[]);
-void (*qfxMesaDestroyContext)(fxMesaContext ctx);
-void (*qfxMesaMakeCurrent)(fxMesaContext ctx);
-fxMesaContext (*qfxMesaGetCurrentContext)(void);
-void (*qfxMesaSwapBuffers)(void);
-*/
-
-//GLX Functions
-XVisualInfo * (*qglXChooseVisual)( Display *dpy, int screen, int *attribList );
-GLXContext (*qglXCreateContext)( Display *dpy, XVisualInfo *vis, GLXContext shareList, Bool direct );
-void (*qglXDestroyContext)( Display *dpy, GLXContext ctx );
-Bool (*qglXMakeCurrent)( Display *dpy, GLXDrawable drawable, GLXContext ctx);
-void (*qglXCopyContext)( Display *dpy, GLXContext src, GLXContext dst, GLuint mask );
-void (*qglXSwapBuffers)( Display *dpy, GLXDrawable drawable );
 
 void ( APIENTRY * qglAccum )(GLenum op, GLfloat value);
 void ( APIENTRY * qglAlphaFunc )(GLenum func, GLclampf ref);
@@ -398,7 +379,8 @@ void ( APIENTRY * qglUnlockArraysEXT) ( void );
 
 void ( APIENTRY * qglPointParameterfEXT)( GLenum param, GLfloat value );
 void ( APIENTRY * qglPointParameterfvEXT)( GLenum param, const GLfloat *value );
-void ( APIENTRY * qglColorTableEXT)( int, int, int, int, int, const void * );
+void ( APIENTRY * qglColorTableEXT)( GLenum, GLenum, GLsizei, GLenum, GLenum, const GLvoid * );
+
 void ( APIENTRY * qgl3DfxSetPaletteEXT)( GLuint * );
 void ( APIENTRY * qglSelectTextureSGIS)( GLenum );
 void ( APIENTRY * qglMTexCoord2fSGIS)( GLenum, GLfloat, GLfloat );
@@ -2980,20 +2962,6 @@ void QGL_Shutdown( void )
 	qglVertex4sv                 = NULL;
 	qglVertexPointer             = NULL;
 	qglViewport                  = NULL;
-/*
-	qfxMesaCreateContext         = NULL;
-	qfxMesaCreateBestContext     = NULL;
-	qfxMesaDestroyContext        = NULL;
-	qfxMesaMakeCurrent           = NULL;
-	qfxMesaGetCurrentContext     = NULL;
-	qfxMesaSwapBuffers           = NULL;
-*/
-	qglXChooseVisual             = NULL;
-	qglXCreateContext            = NULL;
-	qglXDestroyContext           = NULL;
-	qglXMakeCurrent              = NULL;
-	qglXCopyContext              = NULL;
-	qglXSwapBuffers              = NULL;
 }
 
 #define GPA( a ) dlsym( glw_state.OpenGLLib, a )
@@ -3030,33 +2998,40 @@ qboolean QGL_Init( const char *dllname )
 		putenv( envbuffer );
 	}
 
-	if ( ( glw_state.OpenGLLib = dlopen( dllname, RTLD_LAZY | RTLD_GLOBAL ) ) == 0 )
+	if ( glw_state.OpenGLLib )
+		QGL_Shutdown();
+	
+	if ( ( glw_state.OpenGLLib = dlopen( dllname, RTLD_LAZY ) ) == 0 )
 	{
 		char	fn[MAX_OSPATH];
-		FILE *fp;
+		char	*path;
 
 //		ri.Con_Printf(PRINT_ALL, "QGL_Init: Can't load %s from /etc/ld.so.conf: %s\n", 
 //				dllname, dlerror());
 
-		// try path in /etc/quake2.conf
-		if ((fp = fopen(so_file, "r")) == NULL) {
-			ri.Con_Printf(PRINT_ALL,  "QGL_Init(\"%s\") failed: can't open %s\n", dllname, so_file);
-			return false;
-		}
-		fgets(fn, sizeof(fn), fp);
-		fclose(fp);
-		while (*fn && isspace(fn[strlen(fn) - 1]))
-			fn[strlen(fn) - 1] = 0;
-
-		strcat(fn, "/");
-		strcat(fn, dllname);
+		// try basedir next
+		path = ri.Cvar_Get ("basedir", ".", CVAR_NOSET)->string;
+		
+		snprintf (fn, MAX_OSPATH, "%s/%s", path, dllname );
 
 		if ( ( glw_state.OpenGLLib = dlopen( fn, RTLD_LAZY ) ) == 0 ) {
 			ri.Con_Printf( PRINT_ALL, "%s\n", dlerror() );
 			return false;
 		}
+		Com_Printf ("Using %s for OpenGL...", fn); 
+	} else {
+		Com_Printf ("Using %s for OpenGL...", dllname);
 	}
 
+#ifdef USE_GLU
+	if ( (dlopen( "libGLU.so", RTLD_LAZY ) ) == 0 )
+	{
+	  ri.Con_Printf( PRINT_ALL, "%s\n", dlerror() );
+	  return false;
+	} else {
+	  Com_Printf ("Opened GLU sucessfully OpenGLU...", dllname);
+	}
+#endif
 	qglAccum                     = dllAccum = GPA( "glAccum" );
 	qglAlphaFunc                 = dllAlphaFunc = GPA( "glAlphaFunc" );
 	qglAreTexturesResident       = dllAreTexturesResident = GPA( "glAreTexturesResident" );
@@ -3393,21 +3368,7 @@ qboolean QGL_Init( const char *dllname )
 	qglVertex4sv                 = 	dllVertex4sv                 = GPA( "glVertex4sv" );
 	qglVertexPointer             = 	dllVertexPointer             = GPA( "glVertexPointer" );
 	qglViewport                  = 	dllViewport                  = GPA( "glViewport" );
-/*
-	qfxMesaCreateContext         =  GPA("fxMesaCreateContext");
-	qfxMesaCreateBestContext     =  GPA("fxMesaCreateBestContext");
-	qfxMesaDestroyContext        =  GPA("fxMesaDestroyContext");
-	qfxMesaMakeCurrent           =  GPA("fxMesaMakeCurrent");
-	qfxMesaGetCurrentContext     =  GPA("fxMesaGetCurrentContext");
-	qfxMesaSwapBuffers           =  GPA("fxMesaSwapBuffers");
-*/
-	qglXChooseVisual             =  GPA("glXChooseVisual");
-	qglXCreateContext            =  GPA("glXCreateContext");
-	qglXDestroyContext           =  GPA("glXDestroyContext");
-	qglXMakeCurrent              =  GPA("glXMakeCurrent");
-	qglXCopyContext              =  GPA("glXCopyContext");
-	qglXSwapBuffers              =  GPA("glXSwapBuffers");
-
+	
 	qglLockArraysEXT = 0;
 	qglUnlockArraysEXT = 0;
 	qglPointParameterfEXT = 0;

@@ -48,8 +48,6 @@ qboolean	reflib_active = 0;
 
 #define VID_NUM_MODES ( sizeof( vid_modes ) / sizeof( vid_modes[0] ) )
 
-const char so_file[] = "/etc/quake2.conf";
-
 /** KEYBOARD **************************************************************/
 
 void Do_Key_Event(int key, qboolean down);
@@ -71,6 +69,11 @@ void (*RW_IN_Frame_fp)(void);
 
 void Real_IN_Init (void);
 
+/** CLIPBOARD *************************************************************/
+
+char *(*RW_Sys_GetClipboardData_fp)(void);
+
+extern void	VID_MenuShutdown(void);
 /*
 ==========================================================================
 
@@ -84,10 +87,9 @@ void VID_Printf (int print_level, char *fmt, ...)
 {
 	va_list		argptr;
 	char		msg[MAXPRINTMSG];
-	static qboolean	inupdate;
 	
 	va_start (argptr,fmt);
-	vsprintf (msg,fmt,argptr);
+	vsnprintf (msg,MAXPRINTMSG,fmt,argptr);
 	va_end (argptr);
 
 	if (print_level == PRINT_ALL)
@@ -100,10 +102,9 @@ void VID_Error (int err_level, char *fmt, ...)
 {
 	va_list		argptr;
 	char		msg[MAXPRINTMSG];
-	static qboolean	inupdate;
 	
 	va_start (argptr,fmt);
-	vsprintf (msg,fmt,argptr);
+	vsnprintf (msg,MAXPRINTMSG,fmt,argptr);
 	va_end (argptr);
 
 	Com_Error (err_level,"%s", msg);
@@ -189,7 +190,8 @@ void VID_FreeReflib (void)
 	RW_IN_Commands_fp = NULL;
 	RW_IN_Move_fp = NULL;
 	RW_IN_Frame_fp = NULL;
-
+	RW_Sys_GetClipboardData_fp = NULL;
+	
 	memset (&re, 0, sizeof(re));
 	reflib_library = NULL;
 	reflib_active  = false;
@@ -205,9 +207,9 @@ qboolean VID_LoadRefresh( char *name )
 	refimport_t	ri;
 	GetRefAPI_t	GetRefAPI;
 	char	fn[MAX_OSPATH];
+	char	*path;
 	struct stat st;
 	extern uid_t saved_euid;
-	FILE *fp;
 	
 	if ( reflib_active )
 	{
@@ -226,24 +228,20 @@ qboolean VID_LoadRefresh( char *name )
 	//regain root
 	seteuid(saved_euid);
 
-	if ((fp = fopen(so_file, "r")) == NULL) {
-		Com_Printf( "LoadLibrary(\"%s\") failed: can't open %s (required for location of ref libraries)\n", name, so_file);
+	path = Cvar_Get ("basedir", ".", CVAR_NOSET)->string;
+
+	snprintf (fn, MAX_OSPATH, "%s/%s", path, name );
+	
+	if (stat(fn, &st) == -1) {
+		Com_Printf( "LoadLibrary(\"%s\") failed: %s\n", name, strerror(errno));
 		return false;
 	}
-	fgets(fn, sizeof(fn), fp);
-	fclose(fp);
-	while (*fn && isspace(fn[strlen(fn) - 1]))
-		fn[strlen(fn) - 1] = 0;
-
-	strcat(fn, "/");
-	strcat(fn, name);
-
+	
 	// permission checking
-	if (strstr(fn, "softx") == NULL) { // softx doesn't require root
-		if (stat(fn, &st) == -1) {
-			Com_Printf( "LoadLibrary(\"%s\") failed: %s\n", name, strerror(errno));
-			return false;
-		}
+	if (strstr(fn, "softx") == NULL &&
+	    strstr(fn, "glx") == NULL &&
+	    strstr(fn, "softsdl") == NULL &&
+	    strstr(fn, "sdlgl") == NULL) { // softx doesn't require root	
 #if 0
 		if (st.st_uid != 0) {
 			Com_Printf( "LoadLibrary(\"%s\") failed: ref is not owned by root\n", name);
@@ -260,13 +258,13 @@ qboolean VID_LoadRefresh( char *name )
 		setegid(getgid());
 	}
 
-	if ( ( reflib_library = dlopen( fn, RTLD_LAZY | RTLD_GLOBAL ) ) == 0 )
+	if ( ( reflib_library = dlopen( fn, RTLD_LAZY ) ) == 0 )
 	{
 		Com_Printf( "LoadLibrary(\"%s\") failed: %s\n", name , dlerror());
 		return false;
 	}
 
-  Com_Printf( "LoadLibrary(\"%s\")\n", fn );
+	Com_Printf( "LoadLibrary(\"%s\")\n", fn );
 
 	ri.Cmd_AddCommand = Cmd_AddCommand;
 	ri.Cmd_RemoveCommand = Cmd_RemoveCommand;
@@ -284,6 +282,10 @@ qboolean VID_LoadRefresh( char *name )
 	ri.Vid_GetModeInfo = VID_GetModeInfo;
 	ri.Vid_MenuInit = VID_MenuInit;
 	ri.Vid_NewWindow = VID_NewWindow;
+
+	#ifdef QMAX
+	ri.SetParticlePics = SetParticleImages;
+	#endif
 
 	if ( ( GetRefAPI = (void *) dlsym( reflib_library, "GetRefAPI" ) ) == 0 )
 		Com_Error( ERR_FATAL, "dlsym failed on %s", name );
@@ -310,6 +312,9 @@ qboolean VID_LoadRefresh( char *name )
 		(RW_IN_Frame_fp = dlsym(reflib_library, "RW_IN_Frame")) == NULL)
 		Sys_Error("No RW_IN functions in REF.\n");
 
+	/* this one is optional */
+	RW_Sys_GetClipboardData_fp = dlsym(reflib_library, "RW_Sys_GetClipboardData");
+	
 	Real_IN_Init();
 
 	if ( re.Init( 0, 0 ) == -1 )
@@ -338,6 +343,8 @@ qboolean VID_LoadRefresh( char *name )
 #endif
 	KBD_Init_fp(Do_Key_Event);
 
+	Key_ClearStates();
+	
 	// give up root now
 	setreuid(getuid(), getuid());
 	setegid(getgid());
@@ -392,7 +399,11 @@ Com_Printf("Trying mode 0\n");
 					Com_Error (ERR_FATAL, "Couldn't fall back to software refresh!");
 			}
 
-			Cvar_Set( "vid_ref", "soft" );
+			/* prefer to fall back on X if active */
+			if (getenv("DISPLAY"))
+				Cvar_Set( "vid_ref", "softx" );
+			else
+				Cvar_Set( "vid_ref", "soft" );
 
 			/*
 			** drop the console if we fail to load a refresh
@@ -453,8 +464,33 @@ void VID_Shutdown (void)
 		re.Shutdown ();
 		VID_FreeReflib ();
 	}
+
+	VID_MenuShutdown();
 }
 
+/*
+============
+VID_CheckRefExists
+
+Checks to see if the given ref_NAME.so exists.
+Placed here to avoid complicating other code if the library .so files
+ever have their names changed.
+============
+*/
+qboolean VID_CheckRefExists (const char *ref)
+{
+	char	fn[MAX_OSPATH];
+	char	*path;
+	struct stat st;
+
+	path = Cvar_Get ("basedir", ".", CVAR_NOSET)->string;
+	snprintf (fn, MAX_OSPATH, "%s/ref_%s.so", path, ref );
+	
+	if (stat(fn, &st) == 0)
+		return true;
+	else
+		return false;
+}
 
 /*****************************************************************************/
 /* INPUT                                                                     */
@@ -515,3 +551,10 @@ void Do_Key_Event(int key, qboolean down)
 	Key_Event(key, down, Sys_Milliseconds());
 }
 
+char *Sys_GetClipboardData(void)
+{
+	if (RW_Sys_GetClipboardData_fp)
+		return RW_Sys_GetClipboardData_fp();
+	else
+		return NULL;
+}

@@ -23,18 +23,22 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #endif
 
 #include <stdio.h>
+#include <ctype.h>
 
 #include <GL/gl.h>
+#ifndef SOLARIS
 #include <GL/glext.h>
-#include <math.h>
-
-/*
-#ifndef __linux__
+#else
+#include <GL/glu.h>
 #ifndef GL_COLOR_INDEX8_EXT
 #define GL_COLOR_INDEX8_EXT GL_COLOR_INDEX
 #endif
 #endif
-*/
+#include <math.h>
+
+#ifndef _WIN32
+char *strlwr (char *s);
+#endif
 
 #include "../client/ref.h"
 
@@ -56,7 +60,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #define __VIDDEF_T
 typedef struct
 {
-	unsigned		width, height;			// coordinates from main game
+	int	width, height;			// coordinates from main game
 } viddef_t;
 #endif
 
@@ -421,6 +425,8 @@ typedef struct
 
 	float camera_separation;
 	qboolean stereo_enabled;
+
+	qboolean hwgamma;
 
 	unsigned char originalRedGammaTable[256];
 	unsigned char originalGreenGammaTable[256];

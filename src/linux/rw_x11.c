@@ -35,6 +35,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <ctype.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#ifdef Joystick
+#include <sys/stat.h>
+#include <fcntl.h>
+#endif
 #include <unistd.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -42,6 +46,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <string.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/mman.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -49,26 +54,69 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <X11/keysym.h>
 #include <X11/extensions/XShm.h>
 #include <X11/extensions/xf86dga.h>
+#ifdef OPENGL
+#include <X11/extensions/xf86vmode.h>
+#endif
+#ifdef Joystick
+#include <linux/joystick.h>
+#include <glob.h>
+#endif
 
+#ifdef OPENGL
+#include "../ref_gl/gl_local.h"
+#include <dlfcn.h>
+#else
 #include "../ref_soft/r_local.h"
+#endif
 #include "../client/keys.h"
 #include "../linux/rw_linux.h"
+
+#ifdef OPENGL
+#include <GL/glx.h>
+#include "../linux/glw_linux.h"
+
+glwstate_t glw_state;
+static int scrnum;
+static GLXContext ctx = NULL;
+static cvar_t	*r_fakeFullscreen;
+static qboolean vidmode_ext = false;
+
+static XF86VidModeModeInfo **vidmodes;
+static int num_vidmodes;
+static qboolean vidmode_active = false;
+static XF86VidModeGamma oldgamma;
+
+//GLX Functions
+static XVisualInfo * (*qglXChooseVisual)( Display *dpy, int screen, int *attribList );
+static GLXContext (*qglXCreateContext)( Display *dpy, XVisualInfo *vis, GLXContext shareList, Bool direct );
+static void (*qglXDestroyContext)( Display *dpy, GLXContext ctx );
+static Bool (*qglXMakeCurrent)( Display *dpy, GLXDrawable drawable, GLXContext ctx);
+static void (*qglXCopyContext)( Display *dpy, GLXContext src, GLXContext dst, GLuint mask );
+static void (*qglXSwapBuffers)( Display *dpy, GLXDrawable drawable );
+#endif
 
 /*****************************************************************************/
 
 static qboolean			doShm;
 static Display			*dpy;
+#ifndef OPENGL
 static Colormap			x_cmap;
+static GC			x_gc;
+#endif
+
 static Window			win;
-static GC				x_gc;
 static Visual			*x_vis;
 static XVisualInfo		*x_visinfo;
 static int win_x, win_y;
+static Atom wmDeleteWindow;
 
 #define KEY_MASK (KeyPressMask | KeyReleaseMask)
 #define MOUSE_MASK (ButtonPressMask | ButtonReleaseMask | \
 		    PointerMotionMask | ButtonMotionMask )
 #define X_MASK (KEY_MASK | MOUSE_MASK | VisibilityChangeMask | StructureNotifyMask | ExposureMask )
+
+#define MOUSE_MAX 3000
+#define MOUSE_MIN 40
 
 static int				x_shmeventtype;
 //static XShmSegmentInfo	x_shminfo;
@@ -76,7 +124,9 @@ static int				x_shmeventtype;
 static qboolean			oktodraw = false;
 static qboolean			ignorefirst = false;
 static qboolean			exposureflag = false;
+#ifndef OPENGL
 static qboolean			X11_active = false;
+#endif
 
 int XShmQueryExtension(Display *);
 int XShmGetEventBase(Display *);
@@ -166,15 +216,15 @@ PIXEL24 xlib_rgb24(int r,int g,int b)
 
 void st2_fixup( XImage *framebuf, int x, int y, int width, int height)
 {
-	int xi,yi;
-	unsigned char *src;
+	int yi;
+	byte *src;
 	PIXEL16 *dest;
 	register int count, n;
 
 	if( (x<0)||(y<0) )return;
 
 	for (yi = y; yi < (y+height); yi++) {
-		src = &framebuf->data [yi * framebuf->bytes_per_line];
+		src = (byte *)&framebuf->data [yi * framebuf->bytes_per_line];
 
 		// Duff's Device
 		count = width;
@@ -202,15 +252,15 @@ void st2_fixup( XImage *framebuf, int x, int y, int width, int height)
 
 void st3_fixup( XImage *framebuf, int x, int y, int width, int height)
 {
-	int xi,yi;
-	unsigned char *src;
+	int yi;
+	byte *src;
 	PIXEL24 *dest;
 	register int count, n;
 
 	if( (x<0)||(y<0) )return;
 
 	for (yi = y; yi < (y+height); yi++) {
-		src = &framebuf->data [yi * framebuf->bytes_per_line];
+		src = (byte *)&framebuf->data [yi * framebuf->bytes_per_line];
 
 		// Duff's Device
 		count = width;
@@ -259,8 +309,15 @@ static cvar_t	*m_filter;
 static cvar_t	*in_mouse;
 static cvar_t	*in_dgamouse;
 
-static cvar_t	*vid_xpos;			// X coordinate of window position
-static cvar_t	*vid_ypos;			// Y coordinate of window position
+static cvar_t	*vid_xpos;		     // X coordinate of window position
+static cvar_t	*vid_ypos;		     // Y coordinate of window position
+
+#ifdef Joystick
+static cvar_t   *in_joystick;
+static qboolean joystick_avail = false;
+static int joy_fd, jx, jy, jt;
+static cvar_t   *j_invert_y;
+#endif
 
 static qboolean	mlooking;
 
@@ -268,12 +325,15 @@ static qboolean	mlooking;
 static in_state_t	*in_state;
 
 static cvar_t *sensitivity;
+static cvar_t *exponential_speedup;
 static cvar_t *lookstrafe;
 static cvar_t *m_side;
 static cvar_t *m_yaw;
 static cvar_t *m_pitch;
 static cvar_t *m_forward;
 static cvar_t *freelook;
+
+static Time myxtime;
 
 static void Force_CenterView_f (void)
 {
@@ -291,20 +351,67 @@ static void RW_IN_MLookUp (void)
 	in_state->IN_CenterView_fp ();
 }
 
+#ifdef Joystick
+void InitJoystick() {
+  int i, err;
+  glob_t pglob;
+  struct js_event e;
+
+  joystick_avail = false;
+  err = glob("/dev/js*", 0, NULL, &pglob);
+  
+  if (err) {
+    switch (err) {
+    case GLOB_NOSPACE:
+      ri.Con_Printf(PRINT_ALL, "Error, out of memory while looking for joysticks\n");
+      break;
+    case GLOB_NOMATCH:
+      ri.Con_Printf(PRINT_ALL, "No joysticks found\n");
+      break;
+    default:
+      ri.Con_Printf(PRINT_ALL, "Error #%d while looking for joysticks\n",err);
+    }
+    return;
+  }  
+  
+  for (i=0;i<pglob.gl_pathc;i++) {
+    ri.Con_Printf(PRINT_ALL, "Trying joystick dev %s\n", pglob.gl_pathv[i]);
+    joy_fd = open (pglob.gl_pathv[i], O_RDONLY | O_NONBLOCK);
+    if (joy_fd == -1) {
+      ri.Con_Printf(PRINT_ALL, "Error opening joystick dev %s\n", 
+		    pglob.gl_pathv[i]);
+    }
+    else {
+      while (read(joy_fd, &e, sizeof(struct js_event))!=-1 &&
+	     (e.type & JS_EVENT_INIT))
+	ri.Con_Printf(PRINT_ALL, "Read init event\n");
+      ri.Con_Printf(PRINT_ALL, "Using joystick dev %s\n", pglob.gl_pathv[i]);
+      joystick_avail = true;
+      return;
+    }
+  }
+  globfree(&pglob);
+}
+#endif
+
 void RW_IN_Init(in_state_t *in_state_p)
 {
-	int mtype;
-	int i;
-
 	in_state = in_state_p;
 
 	// mouse variables
 	m_filter = ri.Cvar_Get ("m_filter", "0", 0);
-    in_mouse = ri.Cvar_Get ("in_mouse", "0", CVAR_ARCHIVE);
-    in_dgamouse = ri.Cvar_Get ("in_dgamouse", "1", CVAR_ARCHIVE);
+	in_mouse = ri.Cvar_Get ("in_mouse", "0", CVAR_ARCHIVE);
+	in_dgamouse = ri.Cvar_Get ("in_dgamouse", "1", CVAR_ARCHIVE);
+#ifdef Joystick
+	in_joystick = ri.Cvar_Get ("in_joystick", "1", CVAR_ARCHIVE);
+	j_invert_y = ri.Cvar_Get ("j_invert_y", "1", CVAR_ARCHIVE);
+#endif
 	freelook = ri.Cvar_Get( "freelook", "0", 0 );
 	lookstrafe = ri.Cvar_Get ("lookstrafe", "0", 0);
 	sensitivity = ri.Cvar_Get ("sensitivity", "3", 0);
+	exponential_speedup = ri.Cvar_Get("exponential_speedup", "0", 
+					  CVAR_ARCHIVE);
+
 	m_pitch = ri.Cvar_Get ("m_pitch", "0.022", 0);
 	m_yaw = ri.Cvar_Get ("m_yaw", "0.022", 0);
 	m_forward = ri.Cvar_Get ("m_forward", "1", 0);
@@ -315,13 +422,14 @@ void RW_IN_Init(in_state_t *in_state_p)
 
 	ri.Cmd_AddCommand ("force_centerview", Force_CenterView_f);
 
-	mouse_avail = true;
+	mouse_avail = true;	
+
+#ifdef Joystick
+	if (in_joystick)
+	  InitJoystick();
+#endif
 }
 
-void RW_IN_Shutdown(void)
-{
-	mouse_avail = false;
-}
 
 /*
 ===========
@@ -331,18 +439,49 @@ IN_Commands
 void RW_IN_Commands (void)
 {
 	int i;
-   
-	if (!mouse_avail) 
-		return;
-   
-	for (i=0 ; i<3 ; i++) {
-		if ( (mouse_buttonstate & (1<<i)) && !(mouse_oldbuttonstate & (1<<i)) )
-			in_state->Key_Event_fp (K_MOUSE1 + i, true);
-
-		if ( !(mouse_buttonstate & (1<<i)) && (mouse_oldbuttonstate & (1<<i)) )
-			in_state->Key_Event_fp (K_MOUSE1 + i, false);
+#ifdef Joystick
+	struct js_event e;
+	int key_index;
+#endif
+	if (mouse_avail) { 
+	  for (i=0 ; i<3 ; i++) {
+	    if ( (mouse_buttonstate & (1<<i)) && !(mouse_oldbuttonstate & (1<<i)) )
+	      in_state->Key_Event_fp (K_MOUSE1 + i, true);
+	    
+	    if ( !(mouse_buttonstate & (1<<i)) && (mouse_oldbuttonstate & (1<<i)) )
+	      in_state->Key_Event_fp (K_MOUSE1 + i, false);
+	  }
+	  mouse_oldbuttonstate = mouse_buttonstate;
 	}
-	mouse_oldbuttonstate = mouse_buttonstate;
+#ifdef Joystick
+	if (joystick_avail) {
+	  while (read(joy_fd, &e, sizeof(struct js_event))!=-1) {
+	    if (JS_EVENT_BUTTON & e.type) {
+	      key_index = (e.number < 4) ? K_JOY1 : K_AUX1;
+	      if (e.value) {
+		in_state->Key_Event_fp (key_index + e.number, true);
+	      }
+	      else {
+		in_state->Key_Event_fp (key_index + e.number, false);
+	      }
+	      //joy_oldbuttonstate = e.number;
+	    }
+	    else if (JS_EVENT_AXIS & e.type) {
+	      switch (e.number) {
+	      case 0:
+		jx = e.value;
+		break;
+	      case 1:
+		jy = e.value;
+		break;
+	      case 3:
+		jt = e.value;
+		break;
+	      }
+	    }
+	  }
+	}
+#endif
 }
 
 /*
@@ -352,38 +491,77 @@ IN_Move
 */
 void RW_IN_Move (usercmd_t *cmd)
 {
-	if (!mouse_avail)
-		return;
-   
-	if (m_filter->value)
-	{
-		mx = (mx + old_mouse_x) * 0.5;
-		my = (my + old_mouse_y) * 0.5;
-	}
-
-	old_mouse_x = mx;
-	old_mouse_y = my;
-
-	mx *= sensitivity->value;
-	my *= sensitivity->value;
-
-// add mouse X/Y movement to cmd
-	if ( (*in_state->in_strafe_state & 1) || 
-		(lookstrafe->value && mlooking ))
-		cmd->sidemove += m_side->value * mx;
+  if (mouse_avail) {
+    if (m_filter->value)
+      {
+	mx = (mx + old_mouse_x) * 0.5;
+	my = (my + old_mouse_y) * 0.5;
+      }
+    
+    old_mouse_x = mx;
+    old_mouse_y = my;
+    
+    if (!exponential_speedup->value) {
+      mx *= sensitivity->value;
+      my *= sensitivity->value;
+    }
+    else {
+      if (mx > MOUSE_MIN || my > MOUSE_MIN || 
+	  mx < -MOUSE_MIN || my < -MOUSE_MIN) {
+	mx = (mx*mx*mx)/4;
+	my = (my*my*my)/4;
+	if (mx > MOUSE_MAX)
+	  mx = MOUSE_MAX;
+	else if (mx < -MOUSE_MAX)
+	  mx = -MOUSE_MAX;
+	if (my > MOUSE_MAX)
+	  my = MOUSE_MAX;
+	else if (my < -MOUSE_MAX)
+	  my = -MOUSE_MAX;
+      }
+    }
+    // add mouse X/Y movement to cmd
+    if ( (*in_state->in_strafe_state & 1) || 
+	 (lookstrafe->value && mlooking ))
+      cmd->sidemove += m_side->value * mx;
+    else
+      in_state->viewangles[YAW] -= m_yaw->value * mx;
+    
+    if ( (mlooking || freelook->value) && 
+	 !(*in_state->in_strafe_state & 1))
+      {
+	in_state->viewangles[PITCH] += m_pitch->value * my;
+      }
+    else
+      {
+	cmd->forwardmove -= m_forward->value * my;
+      }
+    mx = my = 0;
+  }    
+#ifdef Joystick
+  if (joystick_avail) {
+    // add joy X/Y movement to cmd
+    if ( (*in_state->in_strafe_state & 1) || 
+	 (lookstrafe->value && mlooking ))
+      cmd->sidemove += m_side->value * (jx/100);
+    else
+      in_state->viewangles[YAW] -= m_yaw->value * (jx/100);
+    
+    if ( (mlooking || freelook->value) && 
+	 !(*in_state->in_strafe_state & 1))
+      {
+	if (j_invert_y)
+	  in_state->viewangles[PITCH] -= m_pitch->value * (jy/100);
 	else
-		in_state->viewangles[YAW] -= m_yaw->value * mx;
-
-	if ( (mlooking || freelook->value) && 
-		!(*in_state->in_strafe_state & 1))
-	{
-		in_state->viewangles[PITCH] += m_pitch->value * my;
-	}
-	else
-	{
-		cmd->forwardmove -= m_forward->value * my;
-	}
-	mx = my = 0;
+	  in_state->viewangles[PITCH] += m_pitch->value * (jy/100);
+	cmd->forwardmove -= m_forward->value * (jt/100);
+      }
+    else
+      {
+	cmd->forwardmove -= m_forward->value * (jy/100);
+      }
+  }
+#endif
 }
 
 // ========================================================================
@@ -442,9 +620,9 @@ static void install_grabs(void)
 		XWarpPointer(dpy, None, win, 0, 0, 0, 0, vid.width / 2, vid.height / 2);
 
 	XGrabKeyboard(dpy, win,
-				  False,
-				  GrabModeAsync, GrabModeAsync,
-				  CurrentTime);
+		      False,
+		      GrabModeAsync, GrabModeAsync,
+		      CurrentTime);
 
 	mouse_active = true;
 
@@ -504,11 +682,74 @@ void RW_IN_Activate(qboolean active)
 	if (active)
 		IN_ActivateMouse();
 	else
-		IN_DeactivateMouse ();
+		IN_DeactivateMouse();
+}
+
+void RW_IN_Shutdown(void)
+{
+	if (mouse_avail) {
+		RW_IN_Activate (false);
+		
+		mouse_avail = false;
+		
+		ri.Cmd_RemoveCommand ("+mlook");
+		ri.Cmd_RemoveCommand ("-mlook");
+		ri.Cmd_RemoveCommand ("force_centerview");
+	}
+#ifdef Joystick
+	if (joystick_avail)
+	  if (close(joy_fd))
+	    ri.Con_Printf(PRINT_ALL, "Error, Problem closing joystick.");
+#endif
+    
 }
 
 /*****************************************************************************/
 
+char *RW_Sys_GetClipboardData()
+{
+	Window sowner;
+	Atom type, property;
+	unsigned long len, bytes_left, tmp;
+	unsigned char *data;
+	int format, result;
+	char *ret = NULL;
+			
+	sowner = XGetSelectionOwner(dpy, XA_PRIMARY);
+			
+	if (sowner != None) {
+		property = XInternAtom(dpy,
+				       "GETCLIPBOARDDATA_PROP",
+				       False);
+				
+		XConvertSelection(dpy,
+				  XA_PRIMARY, XA_STRING,
+				  property, win, myxtime); /* myxtime == time of last X event */
+		XFlush(dpy);
+
+		XGetWindowProperty(dpy,
+				   win, property,
+				   0, 0, False, AnyPropertyType,
+				   &type, &format, &len,
+				   &bytes_left, &data);
+		if (bytes_left > 0) {
+			result =
+			XGetWindowProperty(dpy,
+					   win, property,
+					   0, bytes_left, True, AnyPropertyType,
+					   &type, &format, &len,
+					   &tmp, &data);
+			if (result == Success) {
+				ret = strdup(data);
+			}
+			XFree(data);
+		}
+	}
+	return ret;
+}
+
+/*****************************************************************************/
+#ifndef OPENGL
 void ResetFrameBuffer(void)
 {
 	int mem;
@@ -540,6 +781,7 @@ void ResetFrameBuffer(void)
 
 	vid.buffer = (byte*) (x_framebuffer[0]);
 }
+#endif
 
 void ResetSharedFrameBuffers(void)
 {
@@ -734,10 +976,36 @@ int XLateKey(XKeyEvent *ev)
 			key = *(unsigned char*)buf;
 			if (key >= 'A' && key <= 'Z')
 				key = key - 'A' + 'a';
+			if (key >= 1 && key <= 26) /* ctrl+alpha */
+				key = key + 'a' - 1;
 			break;
 	} 
 
 	return key;
+}
+
+/* Check to see if this is a repeated key.
+   (idea shamelessly lifted from SDL who...)
+   (idea shamelessly lifted from GII -- thanks guys! :)
+   This has bugs if two keys are being pressed simultaneously and the
+   events start getting interleaved.
+*/
+int X11_KeyRepeat(Display *display, XEvent *event)
+{
+	XEvent peekevent;
+	int repeated;
+
+	repeated = 0;
+	if ( XPending(display) ) {
+		XPeekEvent(display, &peekevent);
+		if ( (peekevent.type == KeyPress) &&
+(peekevent.xkey.keycode == event->xkey.keycode) &&
+((peekevent.xkey.time-event->xkey.time) < 2) ) {
+			repeated = 1;
+			XNextEvent(display, &peekevent);
+		}
+	}
+	return(repeated);
 }
 
 void HandleEvents(void)
@@ -750,106 +1018,124 @@ void HandleEvents(void)
    
 	while (XPending(dpy)) {
 
-		XNextEvent(dpy, &event);
-
-		switch(event.type) {
-		case KeyPress:
-		case KeyRelease:
-			if (in_state && in_state->Key_Event_fp)
-				in_state->Key_Event_fp (XLateKey(&event.xkey), event.type == KeyPress);
-			break;
-
-		case MotionNotify:
-			if (ignorefirst) {
-				ignorefirst = false;
-				break;
-			}
-
-			if (mouse_active) {
-				if (dgamouse) {
-					mx += (event.xmotion.x + win_x) * 2;
-					my += (event.xmotion.y + win_y) * 2;
-				} 
-				else 
-				{
-					mx += ((int)event.xmotion.x - mwx) * 2;
-					my += ((int)event.xmotion.y - mwy) * 2;
-					mwx = event.xmotion.x;
-					mwy = event.xmotion.y;
-
-					if (mx || my)
-						dowarp = true;
-				}
-			}
-			break;
-
-
-			break;
-
-		case ButtonPress:
-			b=-1;
-			if (event.xbutton.button == 1)
-				b = 0;
-			else if (event.xbutton.button == 2)
-				b = 2;
-			else if (event.xbutton.button == 3)
-				b = 1;
-			if (b>=0)
-				mouse_buttonstate |= 1<<b;
-			break;
-
-		case ButtonRelease:
-			b=-1;
-			if (event.xbutton.button == 1)
-				b = 0;
-			else if (event.xbutton.button == 2)
-				b = 2;
-			else if (event.xbutton.button == 3)
-				b = 1;
-			if (b>=0)
-				mouse_buttonstate &= ~(1<<b);
-			break;
-		
-		case CreateNotify :
-			ri.Cvar_Set( "vid_xpos", va("%d", event.xcreatewindow.x));
-			ri.Cvar_Set( "vid_ypos", va("%d", event.xcreatewindow.y));
-			vid_xpos->modified = false;
-			vid_ypos->modified = false;
-			win_x = event.xcreatewindow.x;
-			win_y = event.xcreatewindow.y;
-			break;
-
-		case ConfigureNotify :
-			ri.Cvar_Set( "vid_xpos", va("%d", event.xcreatewindow.x));
-			ri.Cvar_Set( "vid_ypos", va("%d", event.xcreatewindow.y));
-			vid_xpos->modified = false;
-			vid_ypos->modified = false;
-			win_x = event.xconfigure.x;
-			win_y = event.xconfigure.y;
-			config_notify_width = event.xconfigure.width;
-			config_notify_height = event.xconfigure.height;
-			if (config_notify_width != vid.width ||
-				config_notify_height != vid.height)
-				XMoveResizeWindow(dpy, win, win_x, win_y, vid.width, vid.height);
-			config_notify = 1;
-			break;
-
-		default:
-			if (doShm && event.type == x_shmeventtype)
-				oktodraw = true;
-			if (event.type == Expose && !event.xexpose.count)
-				exposureflag = true;
+	  XNextEvent(dpy, &event);
+	  
+	  switch(event.type) {
+	  case KeyPress:
+	    myxtime = event.xkey.time;
+	    if (in_state && in_state->Key_Event_fp)
+	      in_state->Key_Event_fp (XLateKey(&event.xkey), true);
+	    break;
+	  case KeyRelease:
+	    if (! X11_KeyRepeat(dpy, &event)) {
+	      if (in_state && in_state->Key_Event_fp)
+		in_state->Key_Event_fp (XLateKey(&event.xkey), false);
+	    }
+	    break;
+	    
+	  case MotionNotify:
+	    if (ignorefirst) {
+	      ignorefirst = false;
+	      break;
+	    }
+	    
+	    if (mouse_active) {
+	      if (dgamouse) {
+		mx += (event.xmotion.x + win_x) * 2;
+		my += (event.xmotion.y + win_y) * 2;
+	      } 
+	      else 
+		{
+		  mx += ((int)event.xmotion.x - mwx) * 2;
+		  my += ((int)event.xmotion.y - mwy) * 2;
+		  mwx = event.xmotion.x;
+		  mwy = event.xmotion.y;
+		  
+		  if (mx || my)
+		    dowarp = true;
 		}
+	    }
+	    break;
+	    
+	  case ButtonPress:
+	    myxtime = event.xbutton.time;
+	    
+	    b=-1;
+	    if (event.xbutton.button == 1)
+	      b = 0;
+	    else if (event.xbutton.button == 2)
+	      b = 2;
+	    else if (event.xbutton.button == 3)
+	      b = 1;
+	    else if (event.xbutton.button == 4)
+	      in_state->Key_Event_fp (K_MWHEELUP, 1);
+	    else if (event.xbutton.button == 5)
+	      in_state->Key_Event_fp (K_MWHEELDOWN, 1);
+	    if (b>=0)
+	      mouse_buttonstate |= 1<<b;
+	    break;
+	    
+	  case ButtonRelease:
+	    b=-1;
+	    if (event.xbutton.button == 1)
+	      b = 0;
+	    else if (event.xbutton.button == 2)
+	      b = 2;
+	    else if (event.xbutton.button == 3)
+	      b = 1;
+	    else if (event.xbutton.button == 4)
+	      in_state->Key_Event_fp (K_MWHEELUP, 0);
+	    else if (event.xbutton.button == 5)
+	      in_state->Key_Event_fp (K_MWHEELDOWN, 0);
+	    if (b>=0)
+	      mouse_buttonstate &= ~(1<<b);
+	    break;
+	    
+	  case CreateNotify :
+	    ri.Cvar_Set( "vid_xpos", va("%d", event.xcreatewindow.x));
+	    ri.Cvar_Set( "vid_ypos", va("%d", event.xcreatewindow.y));
+	    vid_xpos->modified = false;
+	    vid_ypos->modified = false;
+	    win_x = event.xcreatewindow.x;
+	    win_y = event.xcreatewindow.y;
+	    break;
+	    
+	  case ConfigureNotify :
+	    ri.Cvar_Set( "vid_xpos", va("%d", event.xcreatewindow.x));
+	    ri.Cvar_Set( "vid_ypos", va("%d", event.xcreatewindow.y));
+	    vid_xpos->modified = false;
+	    vid_ypos->modified = false;
+	    win_x = event.xconfigure.x;
+	    win_y = event.xconfigure.y;
+	    config_notify_width = event.xconfigure.width;
+	    config_notify_height = event.xconfigure.height;
+	    if (config_notify_width != vid.width ||
+		config_notify_height != vid.height)
+	      XMoveResizeWindow(dpy, win, win_x, win_y, vid.width, vid.height);
+	    config_notify = 1;
+	    break;
+	    
+	  case ClientMessage:
+	    if (event.xclient.data.l[0] == wmDeleteWindow)
+	      ri.Cmd_ExecuteText(EXEC_NOW, "quit");
+	    break;
+	  default:
+	    if (doShm && event.type == x_shmeventtype)
+	      oktodraw = true;
+	    if (event.type == Expose && !event.xexpose.count)
+	      exposureflag = true;
+	  }
 	}
-	   
+	
 	if (dowarp) {
-		/* move the mouse to the window center again */
-		XWarpPointer(dpy,None,win,0,0,0,0, vid.width/2,vid.height/2);
+	  /* move the mouse to the window center again */
+	  XWarpPointer(dpy,None,win,0,0,0,0, vid.width/2,vid.height/2);
 	}
 }
 
 /*****************************************************************************/
 
+#ifndef OPENGL
 /*
 ** SWimp_Init
 **
@@ -863,7 +1149,7 @@ int SWimp_Init( void *hInstance, void *wndProc )
 	vid_ypos = ri.Cvar_Get ("vid_ypos", "22", CVAR_ARCHIVE);
 
 // open the display
-	dpy = XOpenDisplay(0);
+	dpy = XOpenDisplay(NULL);
 	if (!dpy)
 	{
 		if (getenv("DISPLAY"))
@@ -885,7 +1171,9 @@ int SWimp_Init( void *hInstance, void *wndProc )
 
 	return true;
 }
+#endif
 
+#ifndef OPENGL
 /*
 ** SWimp_InitGraphics
 **
@@ -898,11 +1186,12 @@ int SWimp_Init( void *hInstance, void *wndProc )
 */
 static qboolean SWimp_InitGraphics( qboolean fullscreen )
 {
-	int pnum, i;
+	int i;
 	XVisualInfo template;
 	int num_visuals;
 	int template_mask;
 	Window root;
+	//int pnum;
 
 	srandom(getpid());
 
@@ -974,6 +1263,8 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 	{
 	   int attribmask = CWEventMask  | CWColormap | CWBorderPixel;
 	   XSetWindowAttributes attribs;
+	   XSizeHints *sizehints;
+	   XWMHints *wmhints;
 	   Colormap tmpcmap;
 	   
 	   tmpcmap = XCreateColormap(dpy, root, x_vis, AllocNone);
@@ -986,8 +1277,51 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 		win = XCreateWindow(dpy, root, (int)vid_xpos->value, (int)vid_ypos->value, 
 			vid.width, vid.height, 0, x_visinfo->depth, InputOutput, x_vis, 
 			attribmask, &attribs );
+		
+		sizehints = XAllocSizeHints();
+		if (sizehints) {
+			sizehints->min_width = vid.width;
+			sizehints->min_height = vid.height;
+			sizehints->max_width = vid.width;
+			sizehints->max_height = vid.height;
+			sizehints->base_width = vid.width;
+			sizehints->base_height = vid.height;
+			
+			sizehints->flags = PMinSize | PMaxSize | PBaseSize;
+		}
+		
+		wmhints = XAllocWMHints();
+		if (wmhints) {
+			#include "q2icon.xbm"
+
+			Pixmap icon_pixmap, icon_mask;
+			unsigned long fg, bg;
+			int i;
+		
+			fg = BlackPixel(dpy, x_visinfo->screen);
+			bg = WhitePixel(dpy, x_visinfo->screen);
+			icon_pixmap = XCreatePixmapFromBitmapData(dpy, win, (char *)q2icon_bits, q2icon_width, q2icon_height, fg, bg, x_visinfo->depth);
+			for (i = 0; i < sizeof(q2icon_bits); i++)
+				q2icon_bits[i] = ~q2icon_bits[i];
+			icon_mask = XCreatePixmapFromBitmapData(dpy, win, (char *)q2icon_bits, q2icon_width, q2icon_height, bg, fg, x_visinfo->depth); 
+		
+			wmhints->flags = IconPixmapHint|IconMaskHint;
+			wmhints->icon_pixmap = icon_pixmap;
+			wmhints->icon_mask = icon_mask;
+		}
+
+		XSetWMProperties(dpy, win, NULL, NULL, NULL, 0,
+			sizehints, wmhints, None);
+		if (sizehints)
+			XFree(sizehints);
+		if (wmhints)
+			XFree(wmhints);
+			
 		XStoreName(dpy, win, "Quake II");
 
+		wmDeleteWindow = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+		XSetWMProtocols(dpy, win, &wmDeleteWindow, 1);
+		
 		if (x_visinfo->class != TrueColor)
 			XFreeColormap(dpy, tmpcmap);
 	}
@@ -1016,7 +1350,6 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 
 // wait for first exposure event
 	{
-		XEvent event;
 		exposureflag = false;
 		do
 		{
@@ -1033,11 +1366,16 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 		displayname = (char *) getenv("DISPLAY");
 		if (displayname)
 		{
-			char *d = displayname;
+			char *dptr = strdup(displayname);
+			char *d;
+			
+			d = dptr;
 			while (*d && (*d != ':')) d++;
 			if (*d) *d = 0;
 			if (!(!strcasecmp(displayname, "unix") || !*displayname))
 				doShm = false;
+			
+			free(dptr);
 		}
 	}
 
@@ -1051,7 +1389,7 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 
 	current_framebuffer = 0;
 	vid.rowbytes = x_framebuffer[0]->bytes_per_line;
-	vid.buffer = x_framebuffer[0]->data;
+	vid.buffer = (byte *)x_framebuffer[0]->data;
 
 //	XSynchronize(dpy, False);
 
@@ -1059,7 +1397,9 @@ static qboolean SWimp_InitGraphics( qboolean fullscreen )
 
 	return true;
 }
+#endif
 
+#ifndef OPENGL
 /*
 ** SWimp_EndFrame
 **
@@ -1103,7 +1443,7 @@ void SWimp_EndFrame (void)
 		while (!oktodraw) 
 			HandleEvents();
 		current_framebuffer = !current_framebuffer;
-		vid.buffer = x_framebuffer[current_framebuffer]->data;
+		vid.buffer = (byte *)x_framebuffer[current_framebuffer]->data;
 		XSync(dpy, False);
 	}
 	else
@@ -1116,7 +1456,9 @@ void SWimp_EndFrame (void)
 		XSync(dpy, False);
 	}
 }
+#endif
 
+#ifndef OPENGL
 /*
 ** SWimp_SetMode
 */
@@ -1143,7 +1485,9 @@ rserr_t SWimp_SetMode( int *pwidth, int *pheight, int mode, qboolean fullscreen 
 
 	return retval;
 }
+#endif
 
+#ifndef OPENGL
 /*
 ** SWimp_SetPalette
 **
@@ -1159,8 +1503,8 @@ void SWimp_SetPalette( const unsigned char *palette )
 	if (!X11_active)
 		return;
 
-    if ( !palette )
-        palette = ( const unsigned char * ) sw_state.currentpalette;
+	if ( !palette )
+		palette = ( const unsigned char * ) sw_state.currentpalette;
  
 	for(i=0;i<256;i++) {
 		st2d_8to16table[i]= xlib_rgb16(palette[i*4], palette[i*4+1],palette[i*4+2]);
@@ -1180,7 +1524,9 @@ void SWimp_SetPalette( const unsigned char *palette )
 		XStoreColors(dpy, x_cmap, colors, 256);
 	}
 }
+#endif
 
+#ifndef OPENGL
 /*
 ** SWimp_Shutdown
 **
@@ -1210,19 +1556,23 @@ void SWimp_Shutdown( void )
 
 	XDestroyWindow(	dpy, win );
 
+	win = 0;
+	
 //	XAutoRepeatOn(dpy);
 //	XCloseDisplay(dpy);
 
 	X11_active = false;
 }
+#endif
 
+#ifndef OPENGL
 /*
 ** SWimp_AppActivate
 */
 void SWimp_AppActivate( qboolean active )
 {
 }
-
+#endif
 //===============================================================================
 
 /*
@@ -1270,4 +1620,360 @@ void KBD_Close(void)
 {
 }
 
+#ifdef OPENGL
 
+qboolean GLimp_InitGL (void);
+
+static void signal_handler(int sig)
+{
+	printf("Received signal %d, exiting...\n", sig);
+	GLimp_Shutdown();
+	_exit(0);
+}
+
+static void InitSig(void)
+{
+	signal(SIGHUP, signal_handler);
+	signal(SIGQUIT, signal_handler);
+	signal(SIGILL, signal_handler);
+	signal(SIGTRAP, signal_handler);
+	signal(SIGIOT, signal_handler);
+	signal(SIGBUS, signal_handler);
+	signal(SIGFPE, signal_handler);
+	signal(SIGSEGV, signal_handler);
+	signal(SIGTERM, signal_handler);
+}
+
+/*
+** GLimp_AppActivate
+*/
+void GLimp_AppActivate( qboolean active )
+{
+}
+
+/*
+** GLimp_BeginFrame
+*/
+void GLimp_BeginFrame( float camera_seperation )
+{
+}
+
+
+/*
+** GLimp_EndFrame
+** 
+** Responsible for doing a swapbuffers and possibly for other stuff
+** as yet to be determined.  Probably better not to make this a GLimp
+** function and instead do a call to GLimp_SwapBuffers.
+*/
+void GLimp_EndFrame (void)
+{
+	qglFlush();
+	qglXSwapBuffers(dpy, win);
+}
+
+/*
+** GLimp_Init
+**
+** This routine is responsible for initializing the OS specific portions
+** of OpenGL.  
+*/
+int GLimp_Init( void *hinstance, void *wndproc )
+{
+	InitSig();
+
+	if ( glw_state.OpenGLLib) {
+		#define GPA( a ) dlsym( glw_state.OpenGLLib, a )
+
+		qglXChooseVisual             =  GPA("glXChooseVisual");
+		qglXCreateContext            =  GPA("glXCreateContext");
+		qglXDestroyContext           =  GPA("glXDestroyContext");
+		qglXMakeCurrent              =  GPA("glXMakeCurrent");
+		qglXCopyContext              =  GPA("glXCopyContext");
+		qglXSwapBuffers              =  GPA("glXSwapBuffers");
+		
+		return true;
+	}
+	
+	return false;
+}
+
+/*
+** GLimp_SetMode
+*/
+int GLimp_SetMode( int *pwidth, int *pheight, int mode, qboolean fullscreen )
+{
+	int width, height;
+	int attrib[] = {
+		GLX_RGBA,
+		GLX_RED_SIZE, 1,
+		GLX_GREEN_SIZE, 1,
+		GLX_BLUE_SIZE, 1,
+		GLX_DOUBLEBUFFER,
+		GLX_DEPTH_SIZE, 1,
+		None
+	};
+	Window root;
+	XVisualInfo *visinfo;
+	XSetWindowAttributes attr;
+	XSizeHints *sizehints;
+	XWMHints *wmhints;
+	unsigned long mask;
+	int MajorVersion, MinorVersion;
+	int actualWidth, actualHeight;
+	int i;
+
+	r_fakeFullscreen = ri.Cvar_Get( "r_fakeFullscreen", "0", CVAR_ARCHIVE);
+
+	ri.Con_Printf( PRINT_ALL, "Initializing OpenGL display\n");
+
+	if (fullscreen)
+		ri.Con_Printf (PRINT_ALL, "...setting fullscreen mode %d:", mode );
+	else
+		ri.Con_Printf (PRINT_ALL, "...setting mode %d:", mode );
+
+	if ( !ri.Vid_GetModeInfo( &width, &height, mode ) )
+	{
+		ri.Con_Printf( PRINT_ALL, " invalid mode\n" );
+		return rserr_invalid_mode;
+	}
+
+	ri.Con_Printf( PRINT_ALL, " %d %d\n", width, height );
+
+	// destroy the existing window
+	GLimp_Shutdown ();
+
+#if 0 // this breaks getenv()? - sbf
+	// Mesa VooDoo hacks
+	if (fullscreen)
+		putenv("MESA_GLX_FX=fullscreen");
+	else
+		putenv("MESA_GLX_FX=window");
+#endif
+
+	if (!(dpy = XOpenDisplay(NULL))) {
+		fprintf(stderr, "Error couldn't open the X display\n");
+		return rserr_invalid_mode;
+	}
+
+	scrnum = DefaultScreen(dpy);
+	root = RootWindow(dpy, scrnum);
+
+	// Get video mode list
+	MajorVersion = MinorVersion = 0;
+	if (!XF86VidModeQueryVersion(dpy, &MajorVersion, &MinorVersion)) { 
+		vidmode_ext = false;
+	} else {
+		ri.Con_Printf(PRINT_ALL, "Using XFree86-VidModeExtension Version %d.%d\n",
+			MajorVersion, MinorVersion);
+		vidmode_ext = true;
+	}
+
+	visinfo = qglXChooseVisual(dpy, scrnum, attrib);
+	if (!visinfo) {
+		fprintf(stderr, "Error couldn't get an RGB, Double-buffered, Depth visual\n");
+		return rserr_invalid_mode;
+	}
+
+	gl_state.hwgamma = false;
+
+	if (vidmode_ext) {
+		int best_fit, best_dist, dist, x, y;
+		
+		XF86VidModeGetAllModeLines(dpy, scrnum, &num_vidmodes, &vidmodes);
+
+		// Are we going fullscreen?  If so, let's change video mode
+		if (fullscreen && !r_fakeFullscreen->value) {
+			best_dist = 9999999;
+			best_fit = -1;
+
+			for (i = 0; i < num_vidmodes; i++) {
+				if (width > vidmodes[i]->hdisplay ||
+					height > vidmodes[i]->vdisplay)
+					continue;
+
+				x = width - vidmodes[i]->hdisplay;
+				y = height - vidmodes[i]->vdisplay;
+				dist = (x * x) + (y * y);
+				if (dist < best_dist) {
+					best_dist = dist;
+					best_fit = i;
+				}
+			}
+
+			if (best_fit != -1) {
+				actualWidth = vidmodes[best_fit]->hdisplay;
+				actualHeight = vidmodes[best_fit]->vdisplay;
+
+				// change to the mode
+				XF86VidModeSwitchToMode(dpy, scrnum, vidmodes[best_fit]);
+				vidmode_active = true;
+
+				if (XF86VidModeGetGamma(dpy, scrnum, &oldgamma)) {
+					gl_state.hwgamma = true;
+					/* We can not reliably detect hardware gamma
+					   changes across software gamma calls, which
+					   can reset the flag, so change it anyway */
+					vid_gamma->modified = true;
+					ri.Con_Printf( PRINT_ALL, "Using hardware gamma\n");
+				}
+
+				// Move the viewport to top left
+				XF86VidModeSetViewPort(dpy, scrnum, 0, 0);
+			} else
+				fullscreen = 0;
+		}
+	}
+
+	/* window attributes */
+	attr.background_pixel = 0;
+	attr.border_pixel = 0;
+	attr.colormap = XCreateColormap(dpy, root, visinfo->visual, AllocNone);
+	attr.event_mask = X_MASK;
+	if (vidmode_active) {
+		mask = CWBackPixel | CWColormap | CWSaveUnder | CWBackingStore | 
+			CWEventMask | CWOverrideRedirect;
+		attr.override_redirect = True;
+		attr.backing_store = NotUseful;
+		attr.save_under = False;
+	} else
+		mask = CWBackPixel | CWBorderPixel | CWColormap | CWEventMask;
+
+	win = XCreateWindow(dpy, root, 0, 0, width, height,
+						0, visinfo->depth, InputOutput,
+						visinfo->visual, mask, &attr);
+	
+	sizehints = XAllocSizeHints();
+	if (sizehints) {
+		sizehints->min_width = width;
+		sizehints->min_height = height;
+		sizehints->max_width = width;
+		sizehints->max_height = height;
+		sizehints->base_width = width;
+		sizehints->base_height = vid.height;
+		
+		sizehints->flags = PMinSize | PMaxSize | PBaseSize;
+	}
+	
+	wmhints = XAllocWMHints();
+	if (wmhints) {
+		#include "q2icon.xbm"
+
+		Pixmap icon_pixmap, icon_mask;
+		unsigned long fg, bg;
+		int i;
+		
+		fg = BlackPixel(dpy, visinfo->screen);
+		bg = WhitePixel(dpy, visinfo->screen);
+		icon_pixmap = XCreatePixmapFromBitmapData(dpy, win, (char *)q2icon_bits, q2icon_width, q2icon_height, fg, bg, visinfo->depth);
+		for (i = 0; i < sizeof(q2icon_bits); i++)
+			q2icon_bits[i] = ~q2icon_bits[i];
+		icon_mask = XCreatePixmapFromBitmapData(dpy, win, (char *)q2icon_bits, q2icon_width, q2icon_height, bg, fg, visinfo->depth); 
+	
+		wmhints->flags = IconPixmapHint|IconMaskHint;
+		wmhints->icon_pixmap = icon_pixmap;
+		wmhints->icon_mask = icon_mask;
+	}
+
+	XSetWMProperties(dpy, win, NULL, NULL, NULL, 0,
+			sizehints, wmhints, None);
+	if (sizehints)
+		XFree(sizehints);
+	if (wmhints)
+		XFree(wmhints);
+	
+	XStoreName(dpy, win, "Quake II");
+	
+	wmDeleteWindow = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+	XSetWMProtocols(dpy, win, &wmDeleteWindow, 1);
+	
+	XMapWindow(dpy, win);
+
+	if (vidmode_active) {
+		XMoveWindow(dpy, win, 0, 0);
+		XRaiseWindow(dpy, win);
+		XWarpPointer(dpy, None, win, 0, 0, 0, 0, 0, 0);
+		XFlush(dpy);
+		// Move the viewport to top left
+		XF86VidModeSetViewPort(dpy, scrnum, 0, 0);
+	}
+
+	XFlush(dpy);
+
+	ctx = qglXCreateContext(dpy, visinfo, NULL, True);
+
+	qglXMakeCurrent(dpy, win, ctx);
+
+	*pwidth = width;
+	*pheight = height;
+
+	// let the sound and input subsystems know about the new window
+	ri.Vid_NewWindow (width, height);
+
+	qglXMakeCurrent(dpy, win, ctx);
+
+	return rserr_ok;
+}
+
+void Fake_glColorTableEXT( GLenum target, GLenum internalformat,
+                             GLsizei width, GLenum format, GLenum type,
+                             const GLvoid *table )
+{
+	byte temptable[256][4];
+	byte *intbl;
+	int i;
+
+	for (intbl = (byte *)table, i = 0; i < 256; i++) {
+		temptable[i][2] = *intbl++;
+		temptable[i][1] = *intbl++;
+		temptable[i][0] = *intbl++;
+		temptable[i][3] = 255;
+	}
+	qgl3DfxSetPaletteEXT((GLuint *)temptable);
+}
+
+/*
+** GLimp_Shutdown
+**
+** This routine does all OS specific shutdown procedures for the OpenGL
+** subsystem.  Under OpenGL this means NULLing out the current DC and
+** HGLRC, deleting the rendering context, and releasing the DC acquired
+** for the window.  The state structure is also nulled out.
+**
+*/
+void GLimp_Shutdown( void )
+{
+	uninstall_grabs();
+	mouse_active = false;
+	dgamouse = false;
+
+	if (dpy) {
+		if (ctx)
+			qglXDestroyContext(dpy, ctx);
+		if (win)
+			XDestroyWindow(dpy, win);
+		if (gl_state.hwgamma) {
+			XF86VidModeSetGamma(dpy, scrnum, &oldgamma);
+			/* The gamma has changed, but SetMode will change it
+			   anyway, so why bother?
+			vid_gamma->modified = true; */
+		}
+		if (vidmode_active)
+			XF86VidModeSwitchToMode(dpy, scrnum, vidmodes[0]);
+		XUngrabKeyboard(dpy, CurrentTime);
+		XCloseDisplay(dpy);
+	}
+	ctx = NULL;
+	dpy = NULL;
+	win = 0;
+	ctx = NULL;
+/*	
+	qglXChooseVisual             = NULL;
+	qglXCreateContext            = NULL;
+	qglXDestroyContext           = NULL;
+	qglXMakeCurrent              = NULL;
+	qglXCopyContext              = NULL;
+	qglXSwapBuffers              = NULL;
+*/	
+}
+#endif

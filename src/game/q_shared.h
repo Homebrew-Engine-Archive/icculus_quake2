@@ -29,6 +29,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #pragma warning(disable : 4018)     // signed/unsigned mismatch
 #pragma warning(disable : 4305)		// truncation from const double to float
 
+#define vsnprintf _vsnprintf
 #endif
 
 #include <assert.h>
@@ -145,19 +146,19 @@ extern vec3_t vec3_origin;
 // microsoft's fabs seems to be ungodly slow...
 //float Q_fabs (float f);
 //#define	fabs(f) Q_fabs(f)
-#if !defined C_ONLY && !defined __linux__ && !defined __sgi
+#if defined _WIN32 && !defined C_ONLY
 extern long Q_ftol( float f );
 #else
 #define Q_ftol( f ) ( long ) (f)
 #endif
 
 #define DotProduct(x,y)			(x[0]*y[0]+x[1]*y[1]+x[2]*y[2])
-#define VectorSubtract(a,b,c)	(c[0]=a[0]-b[0],c[1]=a[1]-b[1],c[2]=a[2]-b[2])
+#define VectorSubtract(a,b,c)		(c[0]=a[0]-b[0],c[1]=a[1]-b[1],c[2]=a[2]-b[2])
 #define VectorAdd(a,b,c)		(c[0]=a[0]+b[0],c[1]=a[1]+b[1],c[2]=a[2]+b[2])
 #define VectorCopy(a,b)			(b[0]=a[0],b[1]=a[1],b[2]=a[2])
 #define VectorClear(a)			(a[0]=a[1]=a[2]=0)
 #define VectorNegate(a,b)		(b[0]=-a[0],b[1]=-a[1],b[2]=-a[2])
-#define VectorSet(v, x, y, z)	(v[0]=(x), v[1]=(y), v[2]=(z))
+#define VectorSet(v, x, y, z)		(v[0]=(x), v[1]=(y), v[2]=(z))
 
 void VectorMA (vec3_t veca, float scale, vec3_t vecb, vec3_t vecc);
 
@@ -380,7 +381,10 @@ COLLISION DETECTION
 #define	SURF_FLOWING	0x40	// scroll towards angle
 #define	SURF_NODRAW		0x80	// don't bother referencing the texture
 
-
+#ifdef QMAX
+#define	SURF_WAVES_1	0x100
+#define	SURF_WAVES_2	0x200
+#endif
 
 // content masks
 #define	MASK_ALL				(-1)
@@ -587,6 +591,24 @@ typedef struct
 #define EF_TRACKERTRAIL		0x80000000
 //ROGUE
 
+#ifdef QMAX
+#define PART_GRAVITY	1
+#define PART_SPARK		2
+#define PART_ANGLED		4
+#define PART_DIRECTION	8
+#define PART_TRANS		16
+#define PART_SHADED		32
+#define PART_LIGHTNING	64
+#define PART_BEAM		128
+#define PART_LENSFLARE	256
+#define PART_DEPTHHACK_SHORT	512
+#define PART_DEPTHHACK_MID		1024
+#define PART_DEPTHHACK_LONG		2048
+
+//combo flags
+#define PART_DEPTHHACK	(PART_DEPTHHACK_SHORT|PART_DEPTHHACK_MID|PART_DEPTHHACK_LONG)
+#endif
+
 // entity_state_t->renderfx flags
 #define	RF_MINLIGHT			1		// allways have some light (viewmodel)
 #define	RF_VIEWERMODEL		2		// don't draw through eyes, only mirrors
@@ -608,6 +630,15 @@ typedef struct
 #define	RF_SHELL_HALF_DAM	0x00020000
 #define RF_USE_DISGUISE		0x00040000
 //ROGUE
+
+#ifdef QMAX
+  #define RF_TRANS_ADDITIVE	8192
+  #define RF_MIRRORMODEL		0x00004000
+
+  #define	RF2_NOSHADOW		0x00000001		//no shadow..
+  #define RF2_FORCE_SHADOW	0x00000002		//forced shadow...
+  #define RF2_CAMERAMODEL		0x00000004
+#endif
 
 // player_state_t->refdef flags
 #define	RDF_UNDERWATER		1		// warp the screen as apropriate
@@ -1198,3 +1229,12 @@ typedef struct
 extern int vidref_val;
 // PGM
 // ==================
+
+
+/*
+ * PATCH: eliasm
+ *
+ * Error-safe versions of fread and fwrite
+ */
+size_t verify_fread( void *, size_t, size_t, FILE * );
+size_t verify_fwrite( void *, size_t, size_t, FILE * );

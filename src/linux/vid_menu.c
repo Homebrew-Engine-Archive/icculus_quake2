@@ -1,31 +1,51 @@
-/*
-Copyright (C) 1997-2001 Id Software, Inc.
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 #include "../client/client.h"
 #include "../client/qmenu.h"
 
-#define REF_SOFT	0
-#define REF_SOFTX11	1
-#define REF_MESA3D  2
-#define REF_3DFXGL 3
-#define REF_OPENGLX	4
-#define REF_MESA3DGLX 5
+/*
+====================================================================
+
+REF stuff ...
+Used to dynamically load the menu with only those vid_ref's that
+are present on this system
+
+====================================================================
+*/
+
+/* this will have to be updated if ref's are added/removed from ref_t */
+#define NUMBER_OF_REFS 5
+
+/* all the refs should be initially set to 0 */
+static char *refs[NUMBER_OF_REFS+1] = { 0 };
+
+/* make all these have illegal values, as they will be redefined */
+static int REF_SOFT    = NUMBER_OF_REFS;
+static int REF_SOFTX11 = NUMBER_OF_REFS;
+static int REF_SOFTSDL = NUMBER_OF_REFS;
+static int REF_GLX     = NUMBER_OF_REFS;
+static int REF_SDLGL   = NUMBER_OF_REFS;
+//static int REF_FXGL    = NUMBER_OF_REFS;
+
+static int GL_REF_START = NUMBER_OF_REFS;
+
+typedef struct
+{
+	char menuname[32];
+	char realname[32];
+	int  *pointer;
+} ref_t;
+
+static const ref_t possible_refs[NUMBER_OF_REFS] =
+{
+	{ "[software      ]", "soft",    &REF_SOFT    },
+	{ "[software X11  ]", "softx",   &REF_SOFTX11 },
+	{ "[software SDL  ]", "softsdl", &REF_SOFTSDL },
+	{ "[OpenGL GLX    ]", "glx",     &REF_GLX     },
+	{ "[SDL OpenGL    ]", "sdlgl",   &REF_SDLGL   }
+};
+
+/*
+====================================================================
+*/
 
 extern cvar_t *vid_ref;
 extern cvar_t *vid_fullscreen;
@@ -43,6 +63,7 @@ static cvar_t *sw_stipplealpha;
 static cvar_t *_windowed_mouse;
 
 extern void M_ForceMenuOff( void );
+extern qboolean VID_CheckRefExists( const char *name );
 
 /*
 ====================================================================
@@ -75,7 +96,7 @@ static void DriverCallback( void *unused )
 {
 	s_ref_list[!s_current_menu_index].curvalue = s_ref_list[s_current_menu_index].curvalue;
 
-	if ( s_ref_list[s_current_menu_index].curvalue < 2 )
+	if ( s_ref_list[s_current_menu_index].curvalue < GL_REF_START )
 	{
 		s_current_menu = &s_software_menu;
 		s_current_menu_index = 0;
@@ -105,7 +126,9 @@ static void BrightnessCallback( void *s )
 		s_brightness_slider[0].curvalue = s_brightness_slider[1].curvalue;
 
 	if ( stricmp( vid_ref->string, "soft" ) == 0 ||
-		 stricmp( vid_ref->string, "softx" ) == 0 )
+		 stricmp( vid_ref->string, "softx" ) == 0 ||
+		 stricmp( vid_ref->string, "softsdl" ) == 0 ||
+		 stricmp( vid_ref->string, "glx" ) == 0 )
 	{
 		float gamma = ( 0.8 - ( slider->curvalue/10.0 - 0.5 ) ) + 0.5;
 
@@ -121,6 +144,7 @@ static void ResetDefaults( void *unused )
 static void ApplyChanges( void *unused )
 {
 	float gamma;
+	int ref;
 
 	/*
 	** make values consistent
@@ -143,42 +167,38 @@ static void ApplyChanges( void *unused )
 	Cvar_SetValue( "gl_mode", s_mode_list[OPENGL_MENU].curvalue );
 	Cvar_SetValue( "_windowed_mouse", s_windowed_mouse.curvalue);
 
-	switch ( s_ref_list[s_current_menu_index].curvalue )
+	/*
+	** must use an if here (instead of a switch), since the REF_'s are now variables
+	** and not #DEFINE's (constants)
+	*/
+	ref = s_ref_list[s_current_menu_index].curvalue;
+	if ( ref == REF_SOFT )
 	{
-	case REF_SOFT:
 		Cvar_Set( "vid_ref", "soft" );
-		break;
-	case REF_SOFTX11:
+	}
+	else if ( ref == REF_SOFTX11 )
+	{
 		Cvar_Set( "vid_ref", "softx" );
-		break;
-
-	case REF_MESA3D :
-		Cvar_Set( "vid_ref", "gl" );
-		Cvar_Set( "gl_driver", "libMesaGL.so.2" );
-		if (gl_driver->modified)
-			vid_ref->modified = true;
-		break;
-
-	case REF_OPENGLX :
+	}
+	else if ( ref == REF_SOFTSDL )
+	{
+		Cvar_Set( "vid_ref", "softsdl" );
+	}
+	else if ( ref == REF_GLX )
+	{
 		Cvar_Set( "vid_ref", "glx" );
-		Cvar_Set( "gl_driver", "libGL.so" );
+		// below is wrong if we use different libs for different GL reflibs
+		Cvar_Get( "gl_driver", "libGL.so", CVAR_ARCHIVE ); // ??? create if it doesn't exit
 		if (gl_driver->modified)
 			vid_ref->modified = true;
-		break;
-
-	case REF_MESA3DGLX :
-		Cvar_Set( "vid_ref", "glx" );
-		Cvar_Set( "gl_driver", "libMesaGL.so.2" );
+	}
+	else if ( ref == REF_SDLGL )
+	{
+		Cvar_Set( "vid_ref", "sdlgl" );
+		// below is wrong if we use different libs for different GL reflibs
+		Cvar_Get( "gl_driver", "libGL.so", CVAR_ARCHIVE ); // ??? create if it doesn't exist
 		if (gl_driver->modified)
 			vid_ref->modified = true;
-		break;
-
-	case REF_3DFXGL :
-		Cvar_Set( "vid_ref", "gl" );
-		Cvar_Set( "gl_driver", "lib3dfxgl.so" );
-		if (gl_driver->modified)
-			vid_ref->modified = true;
-		break;
 	}
 
 #if 0
@@ -216,6 +236,8 @@ static void ApplyChanges( void *unused )
 */
 void VID_MenuInit( void )
 {
+	int i, counter;
+
 	static const char *resolutions[] = 
 	{
 		"[320 240  ]",
@@ -228,17 +250,6 @@ void VID_MenuInit( void )
 		"[1152 864 ]",
 		"[1280 1024]",
 		"[1600 1200]",
-		"[2048 1536]",
-		0
-	};
-	static const char *refs[] =
-	{
-		"[software       ]",
-		"[software X11   ]",
-		"[Mesa 3-D 3DFX  ]",
-		"[3DFXGL Miniport]",
-		"[OpenGL glX     ]",
-		"[Mesa 3-D glX   ]",
 		0
 	};
 	static const char *yesno_names[] =
@@ -247,10 +258,46 @@ void VID_MenuInit( void )
 		"yes",
 		0
 	};
-	int i;
+
+	/* make sure these are invalided before showing the menu again */
+	REF_SOFT    = NUMBER_OF_REFS;
+	REF_SOFTX11 = NUMBER_OF_REFS;
+	REF_SOFTSDL = NUMBER_OF_REFS;
+	REF_GLX     = NUMBER_OF_REFS;
+	REF_SDLGL   = NUMBER_OF_REFS;
+	//REF_FXGL    = NUMBER_OF_REFS;
+
+	GL_REF_START = NUMBER_OF_REFS;
+
+	/* now test to see which ref's are present */
+	i = counter = 0;
+	while ( i < NUMBER_OF_REFS )
+	{
+		if ( VID_CheckRefExists( possible_refs[i].realname ) )
+		{
+			*(possible_refs[i].pointer) = counter;
+
+			/* free any previous string */
+			if ( refs[i] )
+				free ( refs[i] );
+			refs[counter] = strdup(possible_refs[i].menuname);
+
+			/*
+			** if we reach the 3rd item in the list, this indicates that a
+			** GL ref has been found; this will change if more software
+			** modes are added to the possible_ref's array
+			*/
+			if ( i == 3 )
+				GL_REF_START = counter;
+
+			counter++;
+		}
+		i++;
+	}
+	refs[counter] = (char*) 0;
 
 	if ( !gl_driver )
-		gl_driver = Cvar_Get( "gl_driver", "libMesaGL.so.2", 0 );
+		gl_driver = Cvar_Get( "gl_driver", "libGL.so", 0 );
 	if ( !gl_picmip )
 		gl_picmip = Cvar_Get( "gl_picmip", "0", 0 );
 	if ( !gl_mode )
@@ -264,7 +311,7 @@ void VID_MenuInit( void )
 		sw_stipplealpha = Cvar_Get( "sw_stipplealpha", "0", CVAR_ARCHIVE );
 
 	if ( !_windowed_mouse)
-        _windowed_mouse = Cvar_Get( "_windowed_mouse", "0", CVAR_ARCHIVE );
+		_windowed_mouse = Cvar_Get( "_windowed_mouse", "0", CVAR_ARCHIVE );
 
 	s_mode_list[SOFTWARE_MENU].curvalue = sw_mode->value;
 	s_mode_list[OPENGL_MENU].curvalue = gl_mode->value;
@@ -285,21 +332,40 @@ void VID_MenuInit( void )
 		s_current_menu_index = SOFTWARE_MENU;
 		s_ref_list[0].curvalue = s_ref_list[1].curvalue = REF_SOFTX11;
 	}
-	else if ( strcmp( vid_ref->string, "gl" ) == 0 )
+	else if (strcmp( vid_ref->string, "softsdl" ) == 0 )
 	{
-		s_current_menu_index = OPENGL_MENU;
-		if ( strcmp( gl_driver->string, "lib3dfxgl.so" ) == 0 )
-			s_ref_list[s_current_menu_index].curvalue = REF_3DFXGL;
-		else
-			s_ref_list[s_current_menu_index].curvalue = REF_MESA3D;
+		s_current_menu_index = SOFTWARE_MENU;
+		s_ref_list[0].curvalue = s_ref_list[1].curvalue = REF_SOFTSDL;
 	}
 	else if ( strcmp( vid_ref->string, "glx" ) == 0 )
 	{
 		s_current_menu_index = OPENGL_MENU;
-		if ( strcmp( gl_driver->string, "libMesaGL.so.2" ) == 0 )
-			s_ref_list[s_current_menu_index].curvalue = REF_MESA3DGLX;
+		s_ref_list[s_current_menu_index].curvalue = REF_GLX;
+#if 0
+		if ( strcmp( gl_driver->string, "3dfxgl" ) == 0 )
+			s_ref_list[s_current_menu_index].curvalue = REF_3DFX;
+		else if ( strcmp( gl_driver->string, "pvrgl" ) == 0 )
+			s_ref_list[s_current_menu_index].curvalue = REF_POWERVR;
+		else if ( strcmp( gl_driver->string, "opengl32" ) == 0 )
+			s_ref_list[s_current_menu_index].curvalue = REF_OPENGL;
 		else
-			s_ref_list[s_current_menu_index].curvalue = REF_OPENGLX;
+			s_ref_list[s_current_menu_index].curvalue = REF_VERITE;
+#endif
+	}
+	else if ( strcmp( vid_ref->string, "sdlgl" ) == 0 )
+	{
+		s_current_menu_index = OPENGL_MENU;
+		s_ref_list[s_current_menu_index].curvalue = REF_SDLGL;
+#if 0
+		if ( strcmp( gl_driver->string, "3dfxgl" ) == 0 )
+			s_ref_list[s_current_menu_index].curvalue = REF_3DFX;
+		else if ( strcmp( gl_driver->string, "pvrgl" ) == 0 )
+			s_ref_list[s_current_menu_index].curvalue = REF_POWERVR;
+		else if ( strcmp( gl_driver->string, "opengl32" ) == 0 )
+			s_ref_list[s_current_menu_index].curvalue = REF_OPENGL;
+		else
+			s_ref_list[s_current_menu_index].curvalue = REF_VERITE;
+#endif
 	}
 
 	s_software_menu.x = viddef.width * 0.50;
@@ -314,7 +380,7 @@ void VID_MenuInit( void )
 		s_ref_list[i].generic.x = 0;
 		s_ref_list[i].generic.y = 0;
 		s_ref_list[i].generic.callback = DriverCallback;
-		s_ref_list[i].itemnames = refs;
+		s_ref_list[i].itemnames = (const char **) refs;
 
 		s_mode_list[i].generic.type = MTYPE_SPINCONTROL;
 		s_mode_list[i].generic.name = "video mode";
@@ -417,6 +483,22 @@ void VID_MenuInit( void )
 
 /*
 ================
+VID_MenuShutdown
+================
+*/
+void VID_MenuShutdown( void )
+{
+	int i;
+
+	for ( i = 0; i < NUMBER_OF_REFS; i++ )
+	{
+		if ( refs[i] )
+			free ( refs[i] );
+	}
+}
+
+/*
+================
 VID_MenuDraw
 ================
 */
@@ -484,5 +566,3 @@ const char *VID_MenuKey( int key )
 
 	return sound;
 }
-
-

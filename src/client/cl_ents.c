@@ -388,8 +388,8 @@ rest of the data stream.
 void CL_ParsePacketEntities (frame_t *oldframe, frame_t *newframe)
 {
 	int			newnum;
-	int			bits;
-	entity_state_t	*oldstate;
+	unsigned		bits;
+	entity_state_t	*oldstate = NULL;
 	int			oldindex, oldnum;
 
 	newframe->parse_entities = cl.parse_entities;
@@ -647,6 +647,19 @@ void CL_FireEntityEvents (frame_t *frame)
 		s1 = &cl_parse_entities[num];
 		if (s1->event)
 			CL_EntityEvent (s1);
+#ifdef QMAX
+		//add stains if moving...
+		if (s1->origin[0]!=s1->old_origin[0]||
+			s1->origin[1]!=s1->old_origin[1]||
+			s1->origin[2]!=s1->old_origin[2])
+		{
+			if (s1->effects & EF_GIB)
+				re.AddStain(s1->origin, 25, 0, -200 ,-200);
+			if (s1->effects & EF_GREENGIB)
+				re.AddStain(s1->origin, 25, -200, 0, -200);
+
+		}
+#endif
 
 		// EF_TELEPORTER acts like an event, but is not cleared each frame
 		if (s1->effects & EF_TELEPORTER)
@@ -1103,12 +1116,13 @@ void CL_AddPacketEntities (frame_t *frame)
 						if (renderfx & RF_SHELL_RED)
 							renderfx |= RF_SHELL_BLUE;
 						// if we have a blue shell (and not a red shell), turn it to cyan by adding green
-						else if (renderfx & RF_SHELL_BLUE)
+						else if (renderfx & RF_SHELL_BLUE) {
 							// go to green if it's on already, otherwise do cyan (flash green)
 							if (renderfx & RF_SHELL_GREEN)
 								renderfx &= ~RF_SHELL_BLUE;
 							else
 								renderfx |= RF_SHELL_GREEN;
+						}
 					}
 				}
 //			}
@@ -1215,11 +1229,11 @@ void CL_AddPacketEntities (frame_t *frame)
 			}
 			else if (effects & EF_GIB)
 			{
-				CL_DiminishingTrail (cent->lerp_origin, ent.origin, cent, effects);
+			  CL_DiminishingTrail (cent->lerp_origin, ent.origin, cent, effects);
 			}
 			else if (effects & EF_GRENADE)
 			{
-				CL_DiminishingTrail (cent->lerp_origin, ent.origin, cent, effects);
+			  CL_DiminishingTrail (cent->lerp_origin, ent.origin, cent, effects);
 			}
 			else if (effects & EF_FLIES)
 			{
@@ -1298,7 +1312,7 @@ void CL_AddPacketEntities (frame_t *frame)
 			// RAFAEL
 			else if (effects & EF_GREENGIB)
 			{
-				CL_DiminishingTrail (cent->lerp_origin, ent.origin, cent, effects);				
+			  //CL_DiminishingTrail (cent->lerp_origin, ent.origin, cent, effects);				
 			}
 			// RAFAEL
 			else if (effects & EF_IONRIPPER)
